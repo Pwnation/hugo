@@ -11,16 +11,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package fmt provides template functions for formatting strings.
 package fmt
 
 import (
 	_fmt "fmt"
+
+	"github.com/gohugoio/hugo/deps"
 	"github.com/gohugoio/hugo/helpers"
 )
 
 // New returns a new instance of the fmt-namespaced template functions.
-func New() *Namespace {
-	return &Namespace{helpers.NewDistinctErrorLogger()}
+func New(d *deps.Deps) *Namespace {
+	return &Namespace{helpers.NewDistinctLogger(d.Log.ERROR)}
 }
 
 // Namespace provides template functions for the "fmt" namespace.
@@ -44,6 +47,8 @@ func (ns *Namespace) Println(a ...interface{}) string {
 	return _fmt.Sprintln(a...)
 }
 
+// Errorf formats according to a format specifier and returns the string as a
+// value that satisfies error.
 func (ns *Namespace) Errorf(format string, a ...interface{}) string {
 	ns.errorLogger.Printf(format, a...)
 	return _fmt.Sprintf(format, a...)

@@ -16,6 +16,7 @@ package partials
 import (
 	"testing"
 
+	"github.com/gohugoio/hugo/common/loggers"
 	"github.com/gohugoio/hugo/deps"
 	"github.com/gohugoio/hugo/tpl/internal"
 	"github.com/stretchr/testify/require"
@@ -26,7 +27,10 @@ func TestInit(t *testing.T) {
 	var ns *internal.TemplateFuncsNamespace
 
 	for _, nsf := range internal.TemplateFuncsNamespaceRegistry {
-		ns = nsf(&deps.Deps{})
+		ns = nsf(&deps.Deps{
+			BuildStartListeners: &deps.Listeners{},
+			Log:                 loggers.NewErrorLogger(),
+		})
 		if ns.Name == name {
 			found = true
 			break

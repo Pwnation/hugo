@@ -39,7 +39,7 @@ func newTemplateFuncster(deps *deps.Deps) *templateFuncster {
 // Partial executes the named partial and returns either a string,
 // when called from text/template, for or a template.HTML.
 func (t *templateFuncster) partial(name string, contextList ...interface{}) (interface{}, error) {
-	if strings.HasPrefix("partials/", name) {
+	if strings.HasPrefix(name, "partials/") {
 		name = name[8:]
 	}
 	var context interface{}
@@ -51,12 +51,12 @@ func (t *templateFuncster) partial(name string, contextList ...interface{}) (int
 	}
 
 	for _, n := range []string{"partials/" + name, "theme/partials/" + name} {
-		templ := t.Tmpl.Lookup(n)
-		if templ == nil {
+		templ, found := t.Tmpl.Lookup(n)
+		if !found {
 			// For legacy reasons.
-			templ = t.Tmpl.Lookup(n + ".html")
+			templ, found = t.Tmpl.Lookup(n + ".html")
 		}
-		if templ != nil {
+		if found {
 			b := bp.GetBuffer()
 			defer bp.PutBuffer(b)
 
@@ -64,7 +64,7 @@ func (t *templateFuncster) partial(name string, contextList ...interface{}) (int
 				return "", err
 			}
 
-			if _, ok := templ.Template.(*texttemplate.Template); ok {
+			if _, ok := templ.(*texttemplate.Template); ok {
 				return b.String(), nil
 			}
 

@@ -1,4 +1,4 @@
-// Copyright 2017 The Hugo Authors. All rights reserved.
+// Copyright 2018 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,6 +11,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package collections provides template functions for manipulating collections
+// such as arrays, maps, and slices.
 package collections
 
 import (
@@ -23,11 +25,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gohugoio/hugo/common/collections"
+	"github.com/gohugoio/hugo/common/maps"
 	"github.com/gohugoio/hugo/common/types"
 	"github.com/gohugoio/hugo/deps"
 	"github.com/gohugoio/hugo/helpers"
 	"github.com/spf13/cast"
 )
+
+func init() {
+	rand.Seed(time.Now().UTC().UnixNano())
+}
 
 // New returns a new instance of the collections-namespaced template functions.
 func New(deps *deps.Deps) *Namespace {
@@ -70,7 +78,7 @@ func (ns *Namespace) After(index interface{}, seq interface{}) (interface{}, err
 	}
 
 	if indexv >= seqv.Len() {
-		return nil, errors.New("no items left")
+		return seqv.Slice(0, 0).Interface(), nil
 	}
 
 	return seqv.Slice(indexv, seqv.Len()).Interface(), nil
@@ -209,8 +217,8 @@ func (ns *Namespace) First(limit interface{}, seq interface{}) (interface{}, err
 		return nil, err
 	}
 
-	if limitv < 1 {
-		return nil, errors.New("can't return negative/empty count of items from sequence")
+	if limitv < 0 {
+		return nil, errors.New("can't return negative count of items from sequence")
 	}
 
 	seqv := reflect.ValueOf(seq)
@@ -292,8 +300,16 @@ func (ns *Namespace) Intersect(l1, l2 interface{}) (interface{}, error) {
 		case reflect.Array, reflect.Slice:
 			for i := 0; i < l1v.Len(); i++ {
 				l1vv := l1v.Index(i)
+				if !l1vv.Type().Comparable() {
+					return make([]interface{}, 0), errors.New("intersect does not support slices or arrays of uncomparable types")
+				}
+
 				for j := 0; j < l2v.Len(); j++ {
 					l2vv := l2v.Index(j)
+					if !l2vv.Type().Comparable() {
+						return make([]interface{}, 0), errors.New("intersect does not support slices or arrays of uncomparable types")
+					}
+
 					ins.handleValuePair(l1vv, l2vv)
 				}
 			}
@@ -306,6 +322,22 @@ func (ns *Namespace) Intersect(l1, l2 interface{}) (interface{}, error) {
 	}
 }
 
+// Group groups a set of elements by the given key.
+// This is currently only supported for Pages.
+func (ns *Namespace) Group(key interface{}, items interface{}) (interface{}, error) {
+	if key == nil {
+		return nil, errors.New("nil is not a valid key to group by")
+	}
+
+	in := newSliceElement(items)
+
+	if g, ok := in.(collections.Grouper); ok {
+		return g.Group(key, items)
+	}
+
+	return nil, fmt.Errorf("grouping not supported for type %T", items)
+}
+
 // IsSet returns whether a given array, channel, slice, or map has a key
 // defined.
 func (ns *Namespace) IsSet(a interface{}, key interface{}) (bool, error) {
@@ -314,7 +346,11 @@ func (ns *Namespace) IsSet(a interface{}, key interface{}) (bool, error) {
 
 	switch av.Kind() {
 	case reflect.Array, reflect.Chan, reflect.Slice:
-		if int64(av.Len()) > kv.Int() {
+		k, err := cast.ToIntE(key)
+		if err != nil {
+			return false, fmt.Errorf("isset unable to use key of type %T as index", key)
+		}
+		if av.Len() > k {
 			return true, nil
 		}
 	case reflect.Map:
@@ -474,7 +510,6 @@ func (ns *Namespace) Shuffle(seq interface{}) (interface{}, error) {
 
 	shuffled := reflect.MakeSlice(reflect.TypeOf(seq), seqv.Len(), seqv.Len())
 
-	rand.Seed(time.Now().UTC().UnixNano())
 	randomIndices := rand.Perm(seqv.Len())
 
 	for index, value := range randomIndices {
@@ -485,8 +520,12 @@ func (ns *Namespace) Shuffle(seq interface{}) (interface{}, error) {
 }
 
 // Slice returns a slice of all passed arguments.
-func (ns *Namespace) Slice(args ...interface{}) []interface{} {
-	return args
+func (ns *Namespace) Slice(args ...interface{}) interface{} {
+	if len(args) == 0 {
+		return args
+	}
+
+	return collections.Slice(args...)
 }
 
 type intersector struct {
@@ -562,6 +601,11 @@ func (ns *Namespace) Union(l1, l2 interface{}) (interface{}, error) {
 
 			for i := 0; i < l1v.Len(); i++ {
 				l1vv, isNil = indirectInterface(l1v.Index(i))
+
+				if !l1vv.Type().Comparable() {
+					return []interface{}{}, errors.New("union does not support slices or arrays of uncomparable types")
+				}
+
 				if !isNil {
 					ins.appendIfNotSeen(l1vv)
 				}
@@ -646,4 +690,10 @@ func (ns *Namespace) Uniq(l interface{}) (interface{}, error) {
 // KeyVals creates a key and values wrapper.
 func (ns *Namespace) KeyVals(key interface{}, vals ...interface{}) (types.KeyValues, error) {
 	return types.KeyValues{Key: key, Values: vals}, nil
+}
+
+// NewScratch creates a new Scratch which can be used to store values in a
+// thread safe way.
+func (ns *Namespace) NewScratch() *maps.Scratch {
+	return maps.NewScratch()
 }

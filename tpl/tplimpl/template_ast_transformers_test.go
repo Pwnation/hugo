@@ -14,23 +14,50 @@ package tplimpl
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	"html/template"
+
+	"github.com/spf13/cast"
 
 	"github.com/stretchr/testify/require"
 )
 
 var (
 	testFuncs = map[string]interface{}{
-		"Echo": func(v interface{}) interface{} { return v },
+		"ToTime": func(v interface{}) interface{} { return cast.ToTime(v) },
+		"First":  func(v ...interface{}) interface{} { return v[0] },
+		"Echo":   func(v interface{}) interface{} { return v },
+		"where": func(seq, key interface{}, args ...interface{}) (interface{}, error) {
+			return map[string]interface{}{
+				"ByWeight": fmt.Sprintf("%v:%v:%v", seq, key, args),
+			}, nil
+		},
+		"site": func() interface{} {
+			return map[string]interface{}{
+				"Params": map[string]interface{}{
+					"lower": "global-site",
+				},
+			}
+		},
 	}
 
 	paramsData = map[string]interface{}{
 		"NotParam": "Hi There",
 		"Slice":    []int{1, 3},
 		"Params": map[string]interface{}{
-			"lower": "P1L",
+			"lower":  "P1L",
+			"slice":  []int{1, 3},
+			"mydate": "1972-01-28",
+		},
+		"Pages": map[string]interface{}{
+			"ByWeight": []int{1, 3},
+		},
+		"CurrentSection": map[string]interface{}{
+			"Params": map[string]interface{}{
+				"lower": "pcurrentsection",
+			},
 		},
 		"Site": map[string]interface{}{
 			"Params": map[string]interface{}{
@@ -40,6 +67,9 @@ var (
 			"Language": map[string]interface{}{
 				"Params": map[string]interface{}{
 					"lower": "P22L",
+					"nested": map[string]interface{}{
+						"lower": "P22L_nested",
+					},
 				},
 			},
 			"Data": map[string]interface{}{
@@ -52,12 +82,14 @@ var (
 
 	paramsTempl = `
 {{ $page := . }}
+{{ $pages := .Pages }}
 {{ $pageParams := .Params }}
 {{ $site := .Site }}
 {{ $siteParams := .Site.Params }}
 {{ $data := .Site.Data }}
 {{ $notparam := .NotParam }}
 
+PCurrentSection: {{ .CurrentSection.Params.LOWER }}
 P1: {{ .Params.LOWER }}
 P1_2: {{ $.Params.LOWER }}
 P1_3: {{ $page.Params.LOWER }}
@@ -67,6 +99,7 @@ P2_2: {{ $.Site.Params.LOWER }}
 P2_3: {{ $site.Params.LOWER }}
 P2_4: {{ $siteParams.LOWER }}
 P22: {{ .Site.Language.Params.LOWER }}
+P22_nested: {{ .Site.Language.Params.NESTED.LOWER }}
 P3: {{ .Site.Data.Params.NOLOW }}
 P3_2: {{ $.Site.Data.Params.NOLOW }}
 P3_3: {{ $site.Data.Params.NOLOW }}
@@ -109,6 +142,31 @@ RANGE: {{ . }}: {{ $.Params.LOWER }}
 F1: {{ printf "themes/%s-theme" .Site.Params.LOWER }}
 F2: {{ Echo (printf "themes/%s-theme" $lower) }}
 F3: {{ Echo (printf "themes/%s-theme" .Site.Params.LOWER) }}
+
+PSLICE: {{ range .Params.SLICE }}PSLICE{{.}}|{{ end }}
+
+{{ $pages := "foo" }}
+{{ $pages := where $pages ".Params.toc_hide" "!=" true }}
+PARAMS STRING: {{ $pages.ByWeight }}
+PARAMS STRING2: {{ with $pages }}{{ .ByWeight }}{{ end }}
+{{ $pages3 := where ".Params.TOC_HIDE" "!=" .Params.LOWER }}
+PARAMS STRING3: {{ $pages3.ByWeight }}
+{{ $first := First .Pages .Site.Params.LOWER }}
+PARAMS COMPOSITE: {{ $first.ByWeight }}
+
+
+{{ $time := $.Params.MyDate | ToTime }}
+{{ $time = $time.AddDate 0 1 0 }}
+PARAMS TIME: {{ $time.Format "2006-01-02" }}
+
+{{ $_x :=  $.Params.MyDate | ToTime }}
+PARAMS TIME2: {{ $_x.AddDate 0 1 0 }}
+
+PARAMS SITE GLOBAL1: {{ site.Params.LOwER }}
+{{ $lower := site.Params.LOwER }}
+{{ $site := site }}
+PARAMS SITE GLOBAL2: {{ $lower }}
+PARAMS SITE GLOBAL3: {{ $site.Params.LOWER }}
 `
 )
 
@@ -142,6 +200,7 @@ func TestParamsKeysToLower(t *testing.T) {
 	require.Contains(t, result, "P2_3: P2L")
 	require.Contains(t, result, "P2_4: P2L")
 	require.Contains(t, result, "P22: P22L")
+	require.Contains(t, result, "P22_nested: P22L_nested")
 	require.Contains(t, result, "P3: P3H")
 	require.Contains(t, result, "P3_2: P3H")
 	require.Contains(t, result, "P3_3: P3H")
@@ -163,6 +222,26 @@ func TestParamsKeysToLower(t *testing.T) {
 	require.Contains(t, result, "F1: themes/P2L-theme")
 	require.Contains(t, result, "F2: themes/P2L-theme")
 	require.Contains(t, result, "F3: themes/P2L-theme")
+
+	require.Contains(t, result, "PSLICE: PSLICE1|PSLICE3|")
+	require.Contains(t, result, "PARAMS STRING: foo:.Params.toc_hide:[!= true]")
+	require.Contains(t, result, "PARAMS STRING2: foo:.Params.toc_hide:[!= true]")
+	require.Contains(t, result, "PARAMS STRING3: .Params.TOC_HIDE:!=:[P1L]")
+
+	// Issue #5094
+	require.Contains(t, result, "PARAMS COMPOSITE: [1 3]")
+
+	// Issue #5068
+	require.Contains(t, result, "PCurrentSection: pcurrentsection")
+
+	// Issue #5541
+	require.Contains(t, result, "PARAMS TIME: 1972-02-28")
+	require.Contains(t, result, "PARAMS TIME2: 1972-02-28")
+
+	// Issue ##5615
+	require.Contains(t, result, "PARAMS SITE GLOBAL1: global-site")
+	require.Contains(t, result, "PARAMS SITE GLOBAL2: global-site")
+	require.Contains(t, result, "PARAMS SITE GLOBAL3: global-site")
 
 }
 
@@ -197,6 +276,9 @@ func TestParamsKeysToLowerVars(t *testing.T) {
 			"Params": map[string]interface{}{
 				"colors": map[string]interface{}{
 					"blue": "Amber",
+					"pretty": map[string]interface{}{
+						"first": "Indigo",
+					},
 				},
 			},
 		}
@@ -205,8 +287,14 @@ func TestParamsKeysToLowerVars(t *testing.T) {
 		paramsTempl = `
 {{$__amber_1 := .Params.Colors}}
 {{$__amber_2 := $__amber_1.Blue}}
+{{$__amber_3 := $__amber_1.Pretty}}
+{{$__amber_4 := .Params}}
+
 Color: {{$__amber_2}}
 Blue: {{ $__amber_1.Blue}}
+Pretty First1: {{ $__amber_3.First}}
+Pretty First2: {{ $__amber_1.Pretty.First}}
+Pretty First3: {{ $__amber_4.COLORS.PRETTY.FIRST}}
 `
 	)
 
@@ -225,6 +313,10 @@ Blue: {{ $__amber_1.Blue}}
 	result := b.String()
 
 	require.Contains(t, result, "Color: Amber")
+	require.Contains(t, result, "Blue: Amber")
+	require.Contains(t, result, "Pretty First1: Indigo")
+	require.Contains(t, result, "Pretty First2: Indigo")
+	require.Contains(t, result, "Pretty First3: Indigo")
 
 }
 

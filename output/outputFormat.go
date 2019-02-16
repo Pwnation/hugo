@@ -71,10 +71,8 @@ type Format struct {
 	NotAlternative bool `json:"notAlternative"`
 }
 
+// An ordered list of built-in output formats.
 var (
-	// An ordered list of built-in output formats
-	//
-	// See https://www.ampproject.org/learn/overview/
 	AMPFormat = Format{
 		Name:      "AMP",
 		MediaType: media.HTMLType,
@@ -82,6 +80,7 @@ var (
 		Path:      "amp",
 		Rel:       "amphtml",
 		IsHTML:    true,
+		// See https://www.ampproject.org/learn/overview/
 	}
 
 	CalendarFormat = Format{
@@ -125,6 +124,14 @@ var (
 		Rel:         "alternate",
 	}
 
+	RobotsTxtFormat = Format{
+		Name:        "ROBOTS",
+		MediaType:   media.TextType,
+		BaseName:    "robots",
+		IsPlainText: true,
+		Rel:         "alternate",
+	}
+
 	RSSFormat = Format{
 		Name:      "RSS",
 		MediaType: media.RSSType,
@@ -132,8 +139,17 @@ var (
 		NoUgly:    true,
 		Rel:       "alternate",
 	}
+
+	SitemapFormat = Format{
+		Name:      "Sitemap",
+		MediaType: media.XMLType,
+		BaseName:  "sitemap",
+		NoUgly:    true,
+		Rel:       "sitemap",
+	}
 )
 
+// DefaultFormats contains the default output formats supported by Hugo.
 var DefaultFormats = Formats{
 	AMPFormat,
 	CalendarFormat,
@@ -141,13 +157,16 @@ var DefaultFormats = Formats{
 	CSVFormat,
 	HTMLFormat,
 	JSONFormat,
+	RobotsTxtFormat,
 	RSSFormat,
+	SitemapFormat,
 }
 
 func init() {
 	sort.Sort(DefaultFormats)
 }
 
+// Formats is a slice of Format.
 type Formats []Format
 
 func (formats Formats) Len() int           { return len(formats) }
@@ -160,7 +179,7 @@ func (formats Formats) Less(i, j int) bool { return formats[i].Name < formats[j]
 // The lookup is case insensitive.
 func (formats Formats) GetBySuffix(suffix string) (f Format, found bool) {
 	for _, ff := range formats {
-		if strings.EqualFold(suffix, ff.MediaType.Suffix) {
+		if strings.EqualFold(suffix, ff.MediaType.Suffix()) {
 			if found {
 				// ambiguous
 				found = false
@@ -312,17 +331,20 @@ func decode(mediaTypes media.Types, input, output interface{}) error {
 	return decoder.Decode(input)
 }
 
-func (formats Format) BaseFilename() string {
-	return formats.BaseName + "." + formats.MediaType.Suffix
+// BaseFilename returns the base filename of f including an extension (ie.
+// "index.xml").
+func (f Format) BaseFilename() string {
+	return f.BaseName + f.MediaType.FullSuffix()
 }
 
-func (formats Format) MarshalJSON() ([]byte, error) {
+// MarshalJSON returns the JSON encoding of f.
+func (f Format) MarshalJSON() ([]byte, error) {
 	type Alias Format
 	return json.Marshal(&struct {
 		MediaType string
 		Alias
 	}{
-		MediaType: formats.MediaType.String(),
-		Alias:     (Alias)(formats),
+		MediaType: f.MediaType.String(),
+		Alias:     (Alias)(f),
 	})
 }

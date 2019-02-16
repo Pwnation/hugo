@@ -58,6 +58,29 @@ func (p *Page) CurrentSection() *Page {
 	return v.parent
 }
 
+// FirstSection returns the section on level 1 below home, e.g. "/docs".
+// For the home page, this will return itself.
+func (p *Page) FirstSection() *Page {
+	v := p
+	if v.origOnCopy != nil {
+		v = v.origOnCopy
+	}
+
+	if v.parent == nil || v.parent.IsHome() {
+		return v
+	}
+
+	parent := v.parent
+	for {
+		current := parent
+		parent = parent.parent
+		if parent == nil || parent.IsHome() {
+			return current
+		}
+	}
+
+}
+
 // InSection returns whether the given page is in the current section.
 // Note that this will always return false for pages that are
 // not either regular, home or section pages.
@@ -81,8 +104,11 @@ func (p *Page) InSection(other interface{}) (bool, error) {
 // IsDescendant returns whether the current page is a descendant of the given page.
 // Note that this method is not relevant for taxonomy lists and taxonomy terms pages.
 func (p *Page) IsDescendant(other interface{}) (bool, error) {
+	if p == nil {
+		return false, nil
+	}
 	pp, err := unwrapPage(other)
-	if err != nil {
+	if err != nil || pp == nil {
 		return false, err
 	}
 
@@ -96,8 +122,12 @@ func (p *Page) IsDescendant(other interface{}) (bool, error) {
 // IsAncestor returns whether the current page is an ancestor of the given page.
 // Note that this method is not relevant for taxonomy lists and taxonomy terms pages.
 func (p *Page) IsAncestor(other interface{}) (bool, error) {
+	if p == nil {
+		return false, nil
+	}
+
 	pp, err := unwrapPage(other)
-	if err != nil {
+	if err != nil || pp == nil {
 		return false, err
 	}
 
@@ -122,15 +152,18 @@ func (p *Page) Eq(other interface{}) bool {
 }
 
 func unwrapPage(in interface{}) (*Page, error) {
-	if po, ok := in.(*PageOutput); ok {
-		in = po.Page
-	}
-
-	pp, ok := in.(*Page)
-	if !ok {
+	switch v := in.(type) {
+	case *Page:
+		return v, nil
+	case *PageOutput:
+		return v.Page, nil
+	case *PageWithoutContent:
+		return v.Page, nil
+	case nil:
+		return nil, nil
+	default:
 		return nil, fmt.Errorf("%T not supported", in)
 	}
-	return pp, nil
 }
 
 // Sections returns this section's subsections, if any.
@@ -161,17 +194,15 @@ func (s *Site) assembleSections() Pages {
 	)
 
 	var (
-		home       *Page
 		inPages    = radix.New().Txn()
 		inSections = radix.New().Txn()
 		undecided  Pages
 	)
 
+	home := s.findFirstPageByKindIn(KindHome, s.Pages)
+
 	for i, p := range s.Pages {
 		if p.Kind != KindPage {
-			if p.Kind == KindHome {
-				home = p
-			}
 			continue
 		}
 
@@ -304,7 +335,7 @@ func (s *Site) assembleSections() Pages {
 
 	for _, sect := range sectionPages {
 		if sect.parent != nil {
-			sect.parent.subSections.Sort()
+			sect.parent.subSections.sort()
 		}
 
 		for i, p := range sect.Pages {
@@ -334,8 +365,8 @@ func (s *Site) assembleSections() Pages {
 }
 
 func (p *Page) setPagePages(pages Pages) {
-	pages.Sort()
+	pages.sort()
 	p.Pages = pages
-	p.Data = make(map[string]interface{})
-	p.Data["Pages"] = pages
+	p.data = make(map[string]interface{})
+	p.data["Pages"] = pages
 }

@@ -56,7 +56,7 @@ type targetPathDescriptor struct {
 	// Whether this is a multihost multilingual setup.
 	IsMultihost bool
 
-	// Page.URLPath.URL. Will override any Slug etc. for regular pages.
+	// URL from front matter if set. Will override any Slug etc.
 	URL string
 
 	// Used to create paginator links.
@@ -74,7 +74,7 @@ type targetPathDescriptor struct {
 // and URLs for this Page.
 func (p *Page) createTargetPathDescriptor(t output.Format) (targetPathDescriptor, error) {
 	if p.targetPathDescriptorPrototype == nil {
-		panic(fmt.Sprintf("Must run initTargetPathDescriptor() for page %q, kind %q", p.Title, p.Kind))
+		panic(fmt.Sprintf("Must run initTargetPathDescriptor() for page %q, kind %q", p.title, p.Kind))
 	}
 	d := *p.targetPathDescriptorPrototype
 	d.Type = t
@@ -82,14 +82,13 @@ func (p *Page) createTargetPathDescriptor(t output.Format) (targetPathDescriptor
 }
 
 func (p *Page) initTargetPathDescriptor() error {
-
 	d := &targetPathDescriptor{
 		PathSpec:    p.s.PathSpec,
 		Kind:        p.Kind,
 		Sections:    p.sections,
-		UglyURLs:    p.s.Info.uglyURLs,
-		Dir:         filepath.ToSlash(p.Source.Dir()),
-		URL:         p.URLPath.URL,
+		UglyURLs:    p.s.Info.uglyURLs(p),
+		Dir:         filepath.ToSlash(p.Dir()),
+		URL:         p.frontMatterURL,
 		IsMultihost: p.s.owner.IsMultihost(),
 	}
 
@@ -126,6 +125,40 @@ func (p *Page) initTargetPathDescriptor() error {
 
 }
 
+func (p *Page) initURLs() error {
+	if len(p.outputFormats) == 0 {
+		p.outputFormats = p.s.outputFormats[p.Kind]
+	}
+	target := filepath.ToSlash(p.createRelativeTargetPath())
+	rel := p.s.PathSpec.URLizeFilename(target)
+
+	var err error
+	f := p.outputFormats[0]
+	p.permalink, err = p.s.permalinkForOutputFormat(rel, f)
+	if err != nil {
+		return err
+	}
+
+	p.relTargetPathBase = strings.TrimPrefix(strings.TrimSuffix(target, f.MediaType.FullSuffix()), "/")
+	if prefix := p.s.GetLanguagePrefix(); prefix != "" {
+		// Any language code in the path will be added later.
+		p.relTargetPathBase = strings.TrimPrefix(p.relTargetPathBase, prefix+"/")
+	}
+	p.relPermalink = p.s.PathSpec.PrependBasePath(rel, false)
+	p.layoutDescriptor = p.createLayoutDescriptor()
+	return nil
+}
+
+func (p *Page) initPaths() error {
+	if err := p.initTargetPathDescriptor(); err != nil {
+		return err
+	}
+	if err := p.initURLs(); err != nil {
+		return err
+	}
+	return nil
+}
+
 // createTargetPath creates the target filename for this Page for the given
 // output.Format. Some additional URL parts can also be provided, the typical
 // use case being pagination.
@@ -156,16 +189,11 @@ func createTargetPath(d targetPathDescriptor) string {
 
 	isUgly := d.UglyURLs && !d.Type.NoUgly
 
-	// If the page output format's base name is the same as the page base name,
-	// we treat it as an ugly path, i.e.
-	// my-blog-post-1/index.md => my-blog-post-1/index.html
-	// (given the default values for that content file, i.e. no slug set etc.).
-	// This introduces the behaviour from < Hugo 0.20, see issue #3396.
-	if d.BaseName != "" && d.BaseName == d.Type.BaseName {
+	if d.ExpandedPermalink == "" && d.BaseName != "" && d.BaseName == d.Type.BaseName {
 		isUgly = true
 	}
 
-	if d.Kind != KindPage && len(d.Sections) > 0 {
+	if d.Kind != KindPage && d.URL == "" && len(d.Sections) > 0 {
 		if d.ExpandedPermalink != "" {
 			pagePath = filepath.Join(pagePath, d.ExpandedPermalink)
 		} else {
@@ -178,43 +206,46 @@ func createTargetPath(d targetPathDescriptor) string {
 		pagePath = filepath.Join(pagePath, d.Type.Path)
 	}
 
-	if d.Kind == KindPage {
-		// Always use URL if it's specified
-		if d.URL != "" {
-			if d.IsMultihost && d.LangPrefix != "" && !strings.HasPrefix(d.URL, "/"+d.LangPrefix) {
-				pagePath = filepath.Join(d.LangPrefix, pagePath, d.URL)
-			} else {
-				pagePath = filepath.Join(pagePath, d.URL)
-			}
-			if strings.HasSuffix(d.URL, "/") || !strings.Contains(d.URL, ".") {
-				pagePath = filepath.Join(pagePath, d.Type.BaseName+d.Type.MediaType.FullSuffix())
-			}
+	if d.Kind != KindHome && d.URL != "" {
+		if d.IsMultihost && d.LangPrefix != "" && !strings.HasPrefix(d.URL, "/"+d.LangPrefix) {
+			pagePath = filepath.Join(d.LangPrefix, pagePath, d.URL)
 		} else {
-			if d.ExpandedPermalink != "" {
-				pagePath = filepath.Join(pagePath, d.ExpandedPermalink)
+			pagePath = filepath.Join(pagePath, d.URL)
+		}
 
-			} else {
-				if d.Dir != "" {
-					pagePath = filepath.Join(pagePath, d.Dir)
-				}
-				if d.BaseName != "" {
-					pagePath = filepath.Join(pagePath, d.BaseName)
-				}
-			}
+		if d.Addends != "" {
+			pagePath = filepath.Join(pagePath, d.Addends)
+		}
 
-			if d.Addends != "" {
-				pagePath = filepath.Join(pagePath, d.Addends)
-			}
+		if strings.HasSuffix(d.URL, "/") || !strings.Contains(d.URL, ".") {
+			pagePath = filepath.Join(pagePath, d.Type.BaseName+d.Type.MediaType.FullSuffix())
+		}
 
-			if isUgly {
-				pagePath += d.Type.MediaType.Delimiter + d.Type.MediaType.Suffix
-			} else {
-				pagePath = filepath.Join(pagePath, d.Type.BaseName+d.Type.MediaType.FullSuffix())
-			}
+	} else if d.Kind == KindPage {
+		if d.ExpandedPermalink != "" {
+			pagePath = filepath.Join(pagePath, d.ExpandedPermalink)
 
-			if d.LangPrefix != "" {
-				pagePath = filepath.Join(d.LangPrefix, pagePath)
+		} else {
+			if d.Dir != "" {
+				pagePath = filepath.Join(pagePath, d.Dir)
 			}
+			if d.BaseName != "" {
+				pagePath = filepath.Join(pagePath, d.BaseName)
+			}
+		}
+
+		if d.Addends != "" {
+			pagePath = filepath.Join(pagePath, d.Addends)
+		}
+
+		if isUgly {
+			pagePath += d.Type.MediaType.FullSuffix()
+		} else {
+			pagePath = filepath.Join(pagePath, d.Type.BaseName+d.Type.MediaType.FullSuffix())
+		}
+
+		if d.LangPrefix != "" {
+			pagePath = filepath.Join(d.LangPrefix, pagePath)
 		}
 	} else {
 		if d.Addends != "" {
@@ -244,36 +275,38 @@ func createTargetPath(d targetPathDescriptor) string {
 	return d.PathSpec.MakePathSanitized(pagePath)
 }
 
-func (p *Page) createRelativePermalink() string {
+func (p *Page) createRelativeTargetPath() string {
 
 	if len(p.outputFormats) == 0 {
-		panic(fmt.Sprintf("Page %q missing output format(s)", p.Title))
+		if p.Kind == kindUnknown {
+			panic(fmt.Sprintf("Page %q has unknown kind", p.title))
+		}
+		panic(fmt.Sprintf("Page %q missing output format(s)", p.title))
 	}
 
 	// Choose the main output format. In most cases, this will be HTML.
 	f := p.outputFormats[0]
 
-	return p.createRelativePermalinkForOutputFormat(f)
+	return p.createRelativeTargetPathForOutputFormat(f)
 
 }
 
 func (p *Page) createRelativePermalinkForOutputFormat(f output.Format) string {
+	return p.s.PathSpec.URLizeFilename(p.createRelativeTargetPathForOutputFormat(f))
+}
+
+func (p *Page) createRelativeTargetPathForOutputFormat(f output.Format) string {
 	tp, err := p.createTargetPath(f, p.s.owner.IsMultihost())
 
 	if err != nil {
 		p.s.Log.ERROR.Printf("Failed to create permalink for page %q: %s", p.FullFilePath(), err)
 		return ""
 	}
+
 	// For /index.json etc. we must  use the full path.
-	if strings.HasSuffix(f.BaseFilename(), "html") {
+	if f.MediaType.FullSuffix() == ".html" && filepath.Base(tp) == "index.html" {
 		tp = strings.TrimSuffix(tp, f.BaseFilename())
 	}
 
-	return p.s.PathSpec.URLizeFilename(tp)
-}
-
-func (p *Page) TargetPath() (outfile string) {
-	// Delete in Hugo 0.22
-	helpers.Deprecated("Page", "TargetPath", "This method does not make sanse any more.", true)
-	return ""
+	return tp
 }

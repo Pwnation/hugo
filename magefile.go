@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/magefile/mage/mg"
@@ -19,10 +21,10 @@ import (
 
 const (
 	packageName  = "github.com/gohugoio/hugo"
-	noGitLdflags = "-X $PACKAGE/hugolib.BuildDate=$BUILD_DATE"
+	noGitLdflags = "-X $PACKAGE/common/hugo.buildDate=$BUILD_DATE"
 )
 
-var ldflags = "-X $PACKAGE/hugolib.CommitHash=$COMMIT_HASH -X $PACKAGE/hugolib.BuildDate=$BUILD_DATE"
+var ldflags = "-X $PACKAGE/common/hugo.commitHash=$COMMIT_HASH -X $PACKAGE/common/hugo.buildDate=$BUILD_DATE"
 
 // allow user to override go executable by running as GOEXE=xxx make ... on unix-like systems
 var goexe = "go"
@@ -31,34 +33,25 @@ func init() {
 	if exe := os.Getenv("GOEXE"); exe != "" {
 		goexe = exe
 	}
-}
 
-func getDep() error {
-	return sh.Run(goexe, "get", "-u", "github.com/golang/dep/cmd/dep")
-}
-
-// Install Go Dep and sync Hugo's vendored dependencies
-func Vendor() error {
-	mg.Deps(getDep)
-	return sh.Run("dep", "ensure")
+	// We want to use Go 1.11 modules even if the source lives inside GOPATH.
+	// The default is "auto".
+	os.Setenv("GO111MODULE", "on")
 }
 
 // Build hugo binary
 func Hugo() error {
-	mg.Deps(Vendor)
-	return sh.RunWith(flagEnv(), goexe, "build", "-ldflags", ldflags, packageName)
+	return sh.RunWith(flagEnv(), goexe, "build", "-ldflags", ldflags, "-tags", buildTags(), packageName)
 }
 
 // Build hugo binary with race detector enabled
 func HugoRace() error {
-	mg.Deps(Vendor)
-	return sh.RunWith(flagEnv(), goexe, "build", "-race", "-ldflags", ldflags, packageName)
+	return sh.RunWith(flagEnv(), goexe, "build", "-race", "-ldflags", ldflags, "-tags", buildTags(), packageName)
 }
 
 // Install hugo binary
 func Install() error {
-	mg.Deps(Vendor)
-	return sh.RunWith(flagEnv(), goexe, "install", "-ldflags", ldflags, packageName)
+	return sh.RunWith(flagEnv(), goexe, "install", "-ldflags", ldflags, "-tags", buildTags(), packageName)
 }
 
 func flagEnv() map[string]string {
@@ -68,6 +61,10 @@ func flagEnv() map[string]string {
 		"COMMIT_HASH": hash,
 		"BUILD_DATE":  time.Now().Format("2006-01-02T15:04:05Z0700"),
 	}
+}
+
+func Generate() error {
+	return sh.RunWith(flagEnv(), goexe, "generate", path.Join(packageName, "tpl/tplimpl/embedded/generate"))
 }
 
 // Build hugo without git info
@@ -102,31 +99,37 @@ func Check() {
 		fmt.Printf("Skip Check on %s\n", runtime.Version())
 		return
 	}
-	mg.Deps(Test386, Fmt, Vet)
+
+	mg.Deps(Test386)
+
+	mg.Deps(Fmt, Vet)
+
 	// don't run two tests in parallel, they saturate the CPUs anyway, and running two
 	// causes memory issues in CI.
 	mg.Deps(TestRace)
 }
 
 // Run tests in 32-bit mode
+// Note that we don't run with the extended tag. Currently not supported in 32 bit.
 func Test386() error {
 	return sh.RunWith(map[string]string{"GOARCH": "386"}, goexe, "test", "./...")
 }
 
 // Run tests
 func Test() error {
-	mg.Deps(getDep)
-	return sh.Run(goexe, "test", "./...")
+	return sh.Run(goexe, "test", "./...", "-tags", buildTags())
 }
 
 // Run tests with race detector
 func TestRace() error {
-	mg.Deps(getDep)
-	return sh.Run(goexe, "test", "-race", "./...")
+	return sh.Run(goexe, "test", "-race", "./...", "-tags", buildTags())
 }
 
 // Run gofmt linter
 func Fmt() error {
+	if !isGoLatest() {
+		return nil
+	}
 	pkgs, err := hugoPackages()
 	if err != nil {
 		return err
@@ -163,19 +166,26 @@ func Fmt() error {
 	return nil
 }
 
-var pkgPrefixLen = len("github.com/gohugoio/hugo")
+var (
+	pkgPrefixLen = len("github.com/gohugoio/hugo")
+	pkgs         []string
+	pkgsInit     sync.Once
+)
 
 func hugoPackages() ([]string, error) {
-	mg.Deps(getDep)
-	s, err := sh.Output(goexe, "list", "./...")
-	if err != nil {
-		return nil, err
-	}
-	pkgs := strings.Split(s, "\n")
-	for i := range pkgs {
-		pkgs[i] = "." + pkgs[i][pkgPrefixLen:]
-	}
-	return pkgs, nil
+	var err error
+	pkgsInit.Do(func() {
+		var s string
+		s, err = sh.Output(goexe, "list", "./...")
+		if err != nil {
+			return
+		}
+		pkgs = strings.Split(s, "\n")
+		for i := range pkgs {
+			pkgs[i] = "." + pkgs[i][pkgPrefixLen:]
+		}
+	})
+	return pkgs, err
 }
 
 // Run golint linter
@@ -201,16 +211,14 @@ func Lint() error {
 
 //  Run go vet linter
 func Vet() error {
-	mg.Deps(getDep)
 	if err := sh.Run(goexe, "vet", "./..."); err != nil {
-		return fmt.Errorf("error running govendor: %v", err)
+		return fmt.Errorf("error running go vet: %v", err)
 	}
 	return nil
 }
 
 // Generate test coverage report
 func TestCoverHTML() error {
-	mg.Deps(getDep)
 	const (
 		coverAll = "coverage-all.out"
 		cover    = "coverage.out"
@@ -233,6 +241,9 @@ func TestCoverHTML() error {
 		}
 		b, err := ioutil.ReadFile(cover)
 		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
 			return err
 		}
 		idx := bytes.Index(b, []byte{'\n'})
@@ -247,12 +258,16 @@ func TestCoverHTML() error {
 	return sh.Run(goexe, "tool", "cover", "-html="+coverAll)
 }
 
-// Verify that vendored packages match git HEAD
-func CheckVendor() error {
-	if err := sh.Run("git", "diff-index", "--quiet", "HEAD", "vendor/"); err != nil {
-		// yes, ignore errors from this, not much we can do.
-		sh.Exec(nil, os.Stdout, os.Stderr, "git", "diff", "vendor/")
-		return errors.New("check-vendor target failed: vendored packages out of sync")
+func isGoLatest() bool {
+	return strings.Contains(runtime.Version(), "1.11")
+}
+
+func buildTags() string {
+	// To build the extended Hugo SCSS/SASS enabled version, build with
+	// HUGO_BUILD_TAGS=extended mage install etc.
+	if envtags := os.Getenv("HUGO_BUILD_TAGS"); envtags != "" {
+		return envtags
 	}
-	return nil
+	return "none"
+
 }

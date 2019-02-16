@@ -1,4 +1,4 @@
-// Copyright 2015 The Hugo Authors. All rights reserved.
+// Copyright 2018 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,10 +14,12 @@
 package helpers
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -218,55 +220,90 @@ func TestFindAvailablePort(t *testing.T) {
 	assert.True(t, addr.Port > 0)
 }
 
-func TestToLowerMap(t *testing.T) {
+func TestFastMD5FromFile(t *testing.T) {
+	fs := afero.NewMemMapFs()
 
-	tests := []struct {
-		input    map[string]interface{}
-		expected map[string]interface{}
-	}{
-		{
-			map[string]interface{}{
-				"abC": 32,
-			},
-			map[string]interface{}{
-				"abc": 32,
-			},
-		},
-		{
-			map[string]interface{}{
-				"abC": 32,
-				"deF": map[interface{}]interface{}{
-					23: "A value",
-					24: map[string]interface{}{
-						"AbCDe": "A value",
-						"eFgHi": "Another value",
-					},
-				},
-				"gHi": map[string]interface{}{
-					"J": 25,
-				},
-			},
-			map[string]interface{}{
-				"abc": 32,
-				"def": map[string]interface{}{
-					"23": "A value",
-					"24": map[string]interface{}{
-						"abcde": "A value",
-						"efghi": "Another value",
-					},
-				},
-				"ghi": map[string]interface{}{
-					"j": 25,
-				},
-			},
-		},
+	if err := afero.WriteFile(fs, "small.txt", []byte("abc"), 0777); err != nil {
+		t.Fatal(err)
 	}
 
-	for i, test := range tests {
-		// ToLowerMap modifies input.
-		ToLowerMap(test.input)
-		if !reflect.DeepEqual(test.expected, test.input) {
-			t.Errorf("[%d] Expected\n%#v, got\n%#v\n", i, test.expected, test.input)
-		}
+	if err := afero.WriteFile(fs, "small2.txt", []byte("abd"), 0777); err != nil {
+		t.Fatal(err)
 	}
+
+	if err := afero.WriteFile(fs, "bigger.txt", []byte(strings.Repeat("a bc d e", 100)), 0777); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := afero.WriteFile(fs, "bigger2.txt", []byte(strings.Repeat("c d e f g", 100)), 0777); err != nil {
+		t.Fatal(err)
+	}
+
+	req := require.New(t)
+
+	sf1, err := fs.Open("small.txt")
+	req.NoError(err)
+	sf2, err := fs.Open("small2.txt")
+	req.NoError(err)
+
+	bf1, err := fs.Open("bigger.txt")
+	req.NoError(err)
+	bf2, err := fs.Open("bigger2.txt")
+	req.NoError(err)
+
+	defer sf1.Close()
+	defer sf2.Close()
+	defer bf1.Close()
+	defer bf2.Close()
+
+	m1, err := MD5FromFileFast(sf1)
+	req.NoError(err)
+	req.Equal("e9c8989b64b71a88b4efb66ad05eea96", m1)
+
+	m2, err := MD5FromFileFast(sf2)
+	req.NoError(err)
+	req.NotEqual(m1, m2)
+
+	m3, err := MD5FromFileFast(bf1)
+	req.NoError(err)
+	req.NotEqual(m2, m3)
+
+	m4, err := MD5FromFileFast(bf2)
+	req.NoError(err)
+	req.NotEqual(m3, m4)
+
+	m5, err := MD5FromReader(bf2)
+	req.NoError(err)
+	req.NotEqual(m4, m5)
+}
+
+func BenchmarkMD5FromFileFast(b *testing.B) {
+	fs := afero.NewMemMapFs()
+
+	for _, full := range []bool{false, true} {
+		b.Run(fmt.Sprintf("full=%t", full), func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				if err := afero.WriteFile(fs, "file.txt", []byte(strings.Repeat("1234567890", 2000)), 0777); err != nil {
+					b.Fatal(err)
+				}
+				f, err := fs.Open("file.txt")
+				if err != nil {
+					b.Fatal(err)
+				}
+				b.StartTimer()
+				if full {
+					if _, err := MD5FromReader(f); err != nil {
+						b.Fatal(err)
+					}
+				} else {
+					if _, err := MD5FromFileFast(f); err != nil {
+						b.Fatal(err)
+					}
+				}
+				f.Close()
+			}
+		})
+	}
+
 }

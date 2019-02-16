@@ -22,15 +22,17 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/gohugoio/hugo/tpl"
+	"github.com/gohugoio/hugo/common/loggers"
 
-	jww "github.com/spf13/jwalterweatherman"
+	"github.com/gohugoio/hugo/output"
+	"github.com/gohugoio/hugo/publisher"
+	"github.com/gohugoio/hugo/tpl"
 
 	"github.com/gohugoio/hugo/helpers"
 )
 
 const (
-	alias      = "<!DOCTYPE html><html><head><title>{{ .Permalink }}</title><link rel=\"canonical\" href=\"{{ .Permalink }}\"/><meta name=\"robots\" content=\"noindex\"><meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\" /><meta http-equiv=\"refresh\" content=\"0; url={{ .Permalink }}\" /></head></html>"
+	alias      = "<!DOCTYPE html><html><head><title>{{ .Permalink }}</title><link rel=\"canonical\" href=\"{{ .Permalink }}\"/><meta name=\"robots\" content=\"noindex\"><meta charset=\"utf-8\" /><meta http-equiv=\"refresh\" content=\"0; url={{ .Permalink }}\" /></head></html>"
 	aliasXHtml = "<!DOCTYPE html><html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>{{ .Permalink }}</title><link rel=\"canonical\" href=\"{{ .Permalink }}\"/><meta name=\"robots\" content=\"noindex\"><meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\" /><meta http-equiv=\"refresh\" content=\"0; url={{ .Permalink }}\" /></head></html>"
 )
 
@@ -45,11 +47,11 @@ func init() {
 
 type aliasHandler struct {
 	t         tpl.TemplateFinder
-	log       *jww.Notepad
+	log       *loggers.Logger
 	allowRoot bool
 }
 
-func newAliasHandler(t tpl.TemplateFinder, l *jww.Notepad, allowRoot bool) aliasHandler {
+func newAliasHandler(t tpl.TemplateFinder, l *loggers.Logger, allowRoot bool) aliasHandler {
 	return aliasHandler{t, l, allowRoot}
 }
 
@@ -59,13 +61,14 @@ func (a aliasHandler) renderAlias(isXHTML bool, permalink string, page *Page) (i
 		t = "alias-xhtml"
 	}
 
-	var templ *tpl.TemplateAdapter
+	var templ tpl.Template
+	var found bool
 
 	if a.t != nil {
-		templ = a.t.Lookup("alias.html")
+		templ, found = a.t.Lookup("alias.html")
 	}
 
-	if templ == nil {
+	if !found {
 		def := defaultAliasTemplates.Lookup(t)
 		if def != nil {
 			templ = &tpl.TemplateAdapter{Template: def}
@@ -88,11 +91,11 @@ func (a aliasHandler) renderAlias(isXHTML bool, permalink string, page *Page) (i
 	return buffer, nil
 }
 
-func (s *Site) writeDestAlias(path, permalink string, p *Page) (err error) {
-	return s.publishDestAlias(false, path, permalink, p)
+func (s *Site) writeDestAlias(path, permalink string, outputFormat output.Format, p *Page) (err error) {
+	return s.publishDestAlias(false, path, permalink, outputFormat, p)
 }
 
-func (s *Site) publishDestAlias(allowRoot bool, path, permalink string, p *Page) (err error) {
+func (s *Site) publishDestAlias(allowRoot bool, path, permalink string, outputFormat output.Format, p *Page) (err error) {
 	handler := newAliasHandler(s.Tmpl, s.Log, allowRoot)
 
 	isXHTML := strings.HasSuffix(path, ".xhtml")
@@ -109,7 +112,14 @@ func (s *Site) publishDestAlias(allowRoot bool, path, permalink string, p *Page)
 		return err
 	}
 
-	return s.publish(targetPath, aliasContent)
+	pd := publisher.Descriptor{
+		Src:          aliasContent,
+		TargetPath:   targetPath,
+		StatCounter:  &s.PathSpec.ProcessingStats.Aliases,
+		OutputFormat: outputFormat,
+	}
+
+	return s.publisher.Publish(pd)
 
 }
 
@@ -164,7 +174,7 @@ func (a aliasHandler) targetPathAlias(src string) (string, error) {
 			return "", fmt.Errorf("Cannot create \"%s\": Windows filename restriction", originalAlias)
 		}
 		for _, m := range msgs {
-			a.log.WARN.Println(m)
+			a.log.INFO.Println(m)
 		}
 	}
 

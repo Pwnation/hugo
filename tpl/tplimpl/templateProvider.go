@@ -30,13 +30,18 @@ func (*TemplateProvider) Update(deps *deps.Deps) error {
 	newTmpl := newTemplateAdapter(deps)
 	deps.Tmpl = newTmpl
 
+	deps.TextTmpl = newTmpl.NewTextTemplate()
+
 	newTmpl.initFuncs()
-	newTmpl.loadEmbedded()
+
+	if err := newTmpl.loadEmbedded(); err != nil {
+		return err
+	}
 
 	if deps.WithTemplate != nil {
 		err := deps.WithTemplate(newTmpl)
 		if err != nil {
-			newTmpl.addError("init", err)
+			return err
 		}
 
 	}

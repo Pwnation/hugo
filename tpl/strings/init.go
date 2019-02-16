@@ -32,12 +32,17 @@ func init() {
 		ns.AddMethodMapping(ctx.Chomp,
 			[]string{"chomp"},
 			[][2]string{
-				{`{{chomp "<p>Blockhead</p>\n" }}`, `<p>Blockhead</p>`},
+				{`{{chomp "<p>Blockhead</p>\n" | safeHTML }}`, `<p>Blockhead</p>`},
 			},
 		)
 
 		ns.AddMethodMapping(ctx.CountRunes,
 			[]string{"countrunes"},
+			[][2]string{},
+		)
+
+		ns.AddMethodMapping(ctx.RuneCount,
+			nil,
 			[][2]string{},
 		)
 
@@ -150,11 +155,25 @@ func init() {
 			},
 		)
 
+		ns.AddMethodMapping(ctx.FirstUpper,
+			nil,
+			[][2]string{
+				{`{{ "hugo rocks!" | strings.FirstUpper }}`, `Hugo rocks!`},
+			},
+		)
+
 		ns.AddMethodMapping(ctx.Truncate,
 			[]string{"truncate"},
 			[][2]string{
 				{`{{ "this is a very long text" | truncate 10 " ..." }}`, `this is a ...`},
 				{`{{ "With [Markdown](/markdown) inside." | markdownify | truncate 14 }}`, `With <a href="/markdown">Markdown …</a>`},
+			},
+		)
+
+		ns.AddMethodMapping(ctx.Repeat,
+			nil,
+			[][2]string{
+				{`{{ "yo" | strings.Repeat 4 }}`, `yoyoyoyo`},
 			},
 		)
 

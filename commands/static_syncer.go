@@ -17,48 +17,43 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/gohugoio/hugo/hugolib/filesystems"
+
 	"github.com/fsnotify/fsnotify"
 	"github.com/gohugoio/hugo/helpers"
-	src "github.com/gohugoio/hugo/source"
 	"github.com/spf13/fsync"
 )
 
 type staticSyncer struct {
 	c *commandeer
-	d *src.Dirs
 }
 
 func newStaticSyncer(c *commandeer) (*staticSyncer, error) {
-	dirs, err := src.NewDirs(c.Fs, c.Cfg, c.DepsCfg.Logger)
-	if err != nil {
-		return nil, err
-	}
-
-	return &staticSyncer{c: c, d: dirs}, nil
+	return &staticSyncer{c: c}, nil
 }
 
-func (s *staticSyncer) isStatic(path string) bool {
-	return s.d.IsStatic(path)
+func (s *staticSyncer) isStatic(filename string) bool {
+	return s.c.hugo.BaseFs.SourceFilesystems.IsStatic(filename)
 }
 
 func (s *staticSyncer) syncsStaticEvents(staticEvents []fsnotify.Event) error {
 	c := s.c
 
-	syncFn := func(dirs *src.Dirs, publishDir string) error {
-		staticSourceFs, err := dirs.CreateStaticFs()
-		if err != nil {
-			return err
+	syncFn := func(sourceFs *filesystems.SourceFilesystem) (uint64, error) {
+		publishDir := c.hugo.PathSpec.PublishDir
+		// If root, remove the second '/'
+		if publishDir == "//" {
+			publishDir = helpers.FilePathSeparator
 		}
 
-		if staticSourceFs == nil {
-			c.Logger.WARN.Println("No static directories found to sync")
-			return nil
+		if sourceFs.PublishFolder != "" {
+			publishDir = filepath.Join(publishDir, sourceFs.PublishFolder)
 		}
 
 		syncer := fsync.NewSyncer()
 		syncer.NoTimes = c.Cfg.GetBool("noTimes")
 		syncer.NoChmod = c.Cfg.GetBool("noChmod")
-		syncer.SrcFs = staticSourceFs
+		syncer.SrcFs = sourceFs.Fs
 		syncer.DestFs = c.Fs.Destination
 
 		// prevent spamming the log on changes
@@ -83,8 +78,7 @@ func (s *staticSyncer) syncsStaticEvents(staticEvents []fsnotify.Event) error {
 
 			fromPath := ev.Name
 
-			// If we are here we already know the event took place in a static dir
-			relPath := dirs.MakeStaticPathRelative(fromPath)
+			relPath := sourceFs.MakePathRelative(fromPath)
 			if relPath == "" {
 				// Not member of this virtual host.
 				continue
@@ -100,7 +94,7 @@ func (s *staticSyncer) syncsStaticEvents(staticEvents []fsnotify.Event) error {
 			// the source of that static file. In this case Hugo will incorrectly remove that file
 			// from the published directory.
 			if ev.Op&fsnotify.Rename == fsnotify.Rename || ev.Op&fsnotify.Remove == fsnotify.Remove {
-				if _, err := staticSourceFs.Stat(relPath); os.IsNotExist(err) {
+				if _, err := sourceFs.Fs.Stat(relPath); os.IsNotExist(err) {
 					// If file doesn't exist in any static dir, remove it
 					toRemove := filepath.Join(publishDir, relPath)
 
@@ -111,10 +105,10 @@ func (s *staticSyncer) syncsStaticEvents(staticEvents []fsnotify.Event) error {
 					logger.Println("Syncing", relPath, "to", publishDir)
 
 					if err := syncer.Sync(filepath.Join(publishDir, relPath), relPath); err != nil {
-						c.Logger.ERROR.Println(err)
+						c.logger.ERROR.Println(err)
 					}
 				} else {
-					c.Logger.ERROR.Println(err)
+					c.logger.ERROR.Println(err)
 				}
 
 				continue
@@ -123,13 +117,14 @@ func (s *staticSyncer) syncsStaticEvents(staticEvents []fsnotify.Event) error {
 			// For all other event operations Hugo will sync static.
 			logger.Println("Syncing", relPath, "to", publishDir)
 			if err := syncer.Sync(filepath.Join(publishDir, relPath), relPath); err != nil {
-				c.Logger.ERROR.Println(err)
+				c.logger.ERROR.Println(err)
 			}
 		}
 
-		return nil
+		return 0, nil
 	}
 
-	return c.doWithPublishDirs(syncFn)
+	_, err := c.doWithPublishDirs(syncFn)
+	return err
 
 }

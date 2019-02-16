@@ -22,8 +22,11 @@ import (
 	"fmt"
 	"html/template"
 	"os/exec"
+	"runtime"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/gohugoio/hugo/common/maps"
 
 	"github.com/chaseadamsio/goorgeous"
 	bp "github.com/gohugoio/hugo/bufferpool"
@@ -41,11 +44,15 @@ var SummaryDivider = []byte("<!--more-->")
 
 // ContentSpec provides functionality to render markdown content.
 type ContentSpec struct {
-	blackfriday                map[string]interface{}
+	BlackFriday                *BlackFriday
 	footnoteAnchorPrefix       string
 	footnoteReturnLinkContents string
 	// SummaryLength is the length of the summary that Hugo extracts from a content.
 	summaryLength int
+
+	BuildFuture  bool
+	BuildExpired bool
+	BuildDrafts  bool
 
 	Highlight            func(code, lang, optsStr string) (string, error)
 	defatultPygmentsOpts map[string]string
@@ -56,11 +63,15 @@ type ContentSpec struct {
 // NewContentSpec returns a ContentSpec initialized
 // with the appropriate fields from the given config.Provider.
 func NewContentSpec(cfg config.Provider) (*ContentSpec, error) {
+	bf := newBlackfriday(cfg.GetStringMap("blackfriday"))
 	spec := &ContentSpec{
-		blackfriday:                cfg.GetStringMap("blackfriday"),
+		BlackFriday:                bf,
 		footnoteAnchorPrefix:       cfg.GetString("footnoteAnchorPrefix"),
 		footnoteReturnLinkContents: cfg.GetString("footnoteReturnLinkContents"),
 		summaryLength:              cfg.GetInt("summaryLength"),
+		BuildFuture:                cfg.GetBool("buildFuture"),
+		BuildExpired:               cfg.GetBool("buildExpired"),
+		BuildDrafts:                cfg.GetBool("buildDrafts"),
 
 		cfg: cfg,
 	}
@@ -93,13 +104,15 @@ func NewContentSpec(cfg config.Provider) (*ContentSpec, error) {
 	return spec, nil
 }
 
-// Blackfriday holds configuration values for Blackfriday rendering.
-type Blackfriday struct {
+// BlackFriday holds configuration values for BlackFriday rendering.
+type BlackFriday struct {
 	Smartypants           bool
 	SmartypantsQuotesNBSP bool
 	AngledQuotes          bool
 	Fractions             bool
 	HrefTargetBlank       bool
+	NofollowLinks         bool
+	NoreferrerLinks       bool
 	SmartDashes           bool
 	LatexDashes           bool
 	TaskLists             bool
@@ -109,20 +122,22 @@ type Blackfriday struct {
 }
 
 // NewBlackfriday creates a new Blackfriday filled with site config or some sane defaults.
-func (c ContentSpec) NewBlackfriday() *Blackfriday {
+func newBlackfriday(config map[string]interface{}) *BlackFriday {
 	defaultParam := map[string]interface{}{
 		"smartypants":           true,
 		"angledQuotes":          false,
 		"smartypantsQuotesNBSP": false,
 		"fractions":             true,
 		"hrefTargetBlank":       false,
+		"nofollowLinks":         false,
+		"noreferrerLinks":       false,
 		"smartDashes":           true,
 		"latexDashes":           true,
 		"plainIDAnchors":        true,
 		"taskLists":             true,
 	}
 
-	ToLowerMap(defaultParam)
+	maps.ToLower(defaultParam)
 
 	siteConfig := make(map[string]interface{})
 
@@ -130,13 +145,13 @@ func (c ContentSpec) NewBlackfriday() *Blackfriday {
 		siteConfig[k] = v
 	}
 
-	if c.blackfriday != nil {
-		for k, v := range c.blackfriday {
+	if config != nil {
+		for k, v := range config {
 			siteConfig[k] = v
 		}
 	}
 
-	combinedConfig := &Blackfriday{}
+	combinedConfig := &BlackFriday{}
 	if err := mapstructure.Decode(siteConfig, combinedConfig); err != nil {
 		jww.FATAL.Printf("Failed to get site rendering config\n%s", err.Error())
 	}
@@ -269,6 +284,14 @@ func (c *ContentSpec) getHTMLRenderer(defaultFlags int, ctx *RenderingContext) b
 		htmlFlags |= blackfriday.HTML_HREF_TARGET_BLANK
 	}
 
+	if ctx.Config.NofollowLinks {
+		htmlFlags |= blackfriday.HTML_NOFOLLOW_LINKS
+	}
+
+	if ctx.Config.NoreferrerLinks {
+		htmlFlags |= blackfriday.HTML_NOREFERRER_LINKS
+	}
+
 	if ctx.Config.SmartDashes {
 		htmlFlags |= blackfriday.HTML_SMARTYPANTS_DASHES
 	}
@@ -392,6 +415,9 @@ func (c ContentSpec) mmarkRender(ctx *RenderingContext) []byte {
 
 // ExtractTOC extracts Table of Contents from content.
 func ExtractTOC(content []byte) (newcontent []byte, toc []byte) {
+	if !bytes.Contains(content, []byte("<nav>")) {
+		return content, nil
+	}
 	origContent := make([]byte, len(content))
 	copy(origContent, content)
 	first := []byte(`<nav>
@@ -434,7 +460,7 @@ type RenderingContext struct {
 	PageFmt      string
 	DocumentID   string
 	DocumentName string
-	Config       *Blackfriday
+	Config       *BlackFriday
 	RenderTOC    bool
 	Cfg          config.Provider
 }
@@ -482,7 +508,10 @@ func totalWordsOld(s string) int {
 }
 
 // TruncateWordsByRune truncates words by runes.
-func (c *ContentSpec) TruncateWordsByRune(words []string) (string, bool) {
+func (c *ContentSpec) TruncateWordsByRune(in []string) (string, bool) {
+	words := make([]string, len(in))
+	copy(words, in)
+
 	count := 0
 	for index, word := range words {
 		if count >= c.summaryLength {
@@ -650,7 +679,6 @@ func getPythonExecPath() string {
 // getRstContent calls the Python script rst2html as an external helper
 // to convert reStructuredText content to HTML.
 func getRstContent(ctx *RenderingContext) []byte {
-	python := getPythonExecPath()
 	path := getRstExecPath()
 
 	if path == "" {
@@ -660,8 +688,19 @@ func getRstContent(ctx *RenderingContext) []byte {
 
 	}
 	jww.INFO.Println("Rendering", ctx.DocumentName, "with", path, "...")
-	args := []string{path, "--leave-comments", "--initial-header-level=2"}
-	result := externallyRenderContent(ctx, python, args)
+	var result []byte
+	// certain *nix based OSs wrap executables in scripted launchers
+	// invoking binaries on these OSs via python interpreter causes SyntaxError
+	// invoke directly so that shebangs work as expected
+	// handle Windows manually because it doesn't do shebangs
+	if runtime.GOOS == "windows" {
+		python := getPythonExecPath()
+		args := []string{path, "--leave-comments", "--initial-header-level=2"}
+		result = externallyRenderContent(ctx, python, args)
+	} else {
+		args := []string{"--leave-comments", "--initial-header-level=2"}
+		result = externallyRenderContent(ctx, path, args)
+	}
 	// TODO(bep) check if rst2html has a body only option.
 	bodyStart := bytes.Index(result, []byte("<body>\n"))
 	if bodyStart < 0 {
