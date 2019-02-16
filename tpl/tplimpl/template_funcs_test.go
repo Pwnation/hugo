@@ -21,33 +21,45 @@ import (
 	"testing"
 	"time"
 
-	"io/ioutil"
-	"log"
-	"os"
+	"github.com/gohugoio/hugo/htesting"
 
+	"github.com/gohugoio/hugo/common/hugo"
+	"github.com/gohugoio/hugo/common/loggers"
 	"github.com/gohugoio/hugo/config"
 	"github.com/gohugoio/hugo/deps"
-	"github.com/gohugoio/hugo/helpers"
 	"github.com/gohugoio/hugo/hugofs"
 	"github.com/gohugoio/hugo/i18n"
+	"github.com/gohugoio/hugo/langs"
 	"github.com/gohugoio/hugo/tpl"
 	"github.com/gohugoio/hugo/tpl/internal"
 	"github.com/gohugoio/hugo/tpl/partials"
 	"github.com/spf13/afero"
-	jww "github.com/spf13/jwalterweatherman"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 )
 
 var (
-	logger = jww.NewNotepad(jww.LevelFatal, jww.LevelFatal, os.Stdout, ioutil.Discard, "", log.Ldate|log.Ltime)
+	logger = loggers.NewErrorLogger()
 )
 
+func newTestConfig() config.Provider {
+	v := viper.New()
+	v.Set("contentDir", "content")
+	v.Set("dataDir", "data")
+	v.Set("i18nDir", "i18n")
+	v.Set("layoutDir", "layouts")
+	v.Set("archetypeDir", "archetypes")
+	v.Set("assetDir", "assets")
+	v.Set("resourceDir", "resources")
+	v.Set("publishDir", "public")
+	return v
+}
+
 func newDepsConfig(cfg config.Provider) deps.DepsCfg {
-	l := helpers.NewLanguage("en", cfg)
-	l.Set("i18nDir", "i18n")
+	l := langs.NewLanguage("en", cfg)
 	return deps.DepsCfg{
 		Language:            l,
+		Site:                htesting.NewTestHugoSite(),
 		Cfg:                 cfg,
 		Fs:                  hugofs.NewMem(l),
 		Logger:              logger,
@@ -61,16 +73,18 @@ func TestTemplateFuncsExamples(t *testing.T) {
 
 	workingDir := "/home/hugo"
 
-	v := viper.New()
+	v := newTestConfig()
 
 	v.Set("workingDir", workingDir)
 	v.Set("multilingual", true)
+	v.Set("contentDir", "content")
+	v.Set("assetDir", "assets")
 	v.Set("baseURL", "http://mysite.com/hugo/")
-	v.Set("CurrentContentLanguage", helpers.NewLanguage("en", v))
+	v.Set("CurrentContentLanguage", langs.NewLanguage("en", v))
 
 	fs := hugofs.NewMem(v)
 
-	afero.WriteFile(fs.Source, filepath.Join(workingDir, "README.txt"), []byte("Hugo Rocks!"), 0755)
+	afero.WriteFile(fs.Source, filepath.Join(workingDir, "files", "README.txt"), []byte("Hugo Rocks!"), 0755)
 
 	depsCfg := newDepsConfig(v)
 	depsCfg.Fs = fs
@@ -80,12 +94,14 @@ func TestTemplateFuncsExamples(t *testing.T) {
 	var data struct {
 		Title   string
 		Section string
+		Hugo    map[string]interface{}
 		Params  map[string]interface{}
 	}
 
 	data.Title = "**BatMan**"
 	data.Section = "blog"
 	data.Params = map[string]interface{}{"langCode": "en"}
+	data.Hugo = map[string]interface{}{"Version": hugo.MustParseVersion("0.36.1").Version()}
 
 	for _, nsf := range internal.TemplateFuncsNamespaceRegistry {
 		ns := nsf(d)
@@ -100,14 +116,14 @@ func TestTemplateFuncsExamples(t *testing.T) {
 				require.NoError(t, d.LoadResources())
 
 				var b bytes.Buffer
-				require.NoError(t, d.Tmpl.Lookup("test").Execute(&b, &data))
+				templ, _ := d.Tmpl.Lookup("test")
+				require.NoError(t, templ.Execute(&b, &data))
 				if b.String() != expected {
 					t.Fatalf("%s[%d]: got %q expected %q", ns.Name, i, b.String(), expected)
 				}
 			}
 		}
 	}
-
 }
 
 // TODO(bep) it would be dandy to put this one into the partials package, but
@@ -123,7 +139,9 @@ func TestPartialCached(t *testing.T) {
 	var data struct {
 	}
 
-	config := newDepsConfig(viper.New())
+	v := newTestConfig()
+
+	config := newDepsConfig(v)
 
 	config.WithTemplate = func(templ tpl.TemplateHandler) error {
 		err := templ.AddTemplate("partials/"+name, partial)

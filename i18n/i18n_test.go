@@ -19,25 +19,20 @@ import (
 
 	"github.com/gohugoio/hugo/tpl/tplimpl"
 
+	"github.com/gohugoio/hugo/common/loggers"
+	"github.com/gohugoio/hugo/htesting"
+	"github.com/gohugoio/hugo/langs"
 	"github.com/spf13/afero"
 
 	"github.com/gohugoio/hugo/deps"
 
-	"io/ioutil"
-	"os"
-
-	"github.com/gohugoio/hugo/helpers"
-
-	"log"
-
 	"github.com/gohugoio/hugo/config"
 	"github.com/gohugoio/hugo/hugofs"
-	jww "github.com/spf13/jwalterweatherman"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 )
 
-var logger = jww.NewNotepad(jww.LevelError, jww.LevelError, os.Stdout, ioutil.Discard, "", log.Ldate|log.Ltime)
+var logger = loggers.NewErrorLogger()
 
 type i18nTest struct {
 	data                             map[string][]byte
@@ -168,14 +163,15 @@ func doTestI18nTranslate(t *testing.T, test i18nTest, cfg config.Provider) strin
 	assert := require.New(t)
 	fs := hugofs.NewMem(cfg)
 	tp := NewTranslationProvider()
-	depsCfg := newDepsConfig(tp, cfg, fs)
-	d, err := deps.New(depsCfg)
-	assert.NoError(err)
 
 	for file, content := range test.data {
 		err := afero.WriteFile(fs.Source, filepath.Join("i18n", file), []byte(content), 0755)
 		assert.NoError(err)
 	}
+
+	depsCfg := newDepsConfig(tp, cfg, fs)
+	d, err := deps.New(depsCfg)
+	assert.NoError(err)
 
 	assert.NoError(d.LoadResources())
 	f := tp.t.Func(test.lang)
@@ -184,10 +180,11 @@ func doTestI18nTranslate(t *testing.T, test i18nTest, cfg config.Provider) strin
 }
 
 func newDepsConfig(tp *TranslationProvider, cfg config.Provider, fs *hugofs.Fs) deps.DepsCfg {
-	l := helpers.NewLanguage("en", cfg)
+	l := langs.NewLanguage("en", cfg)
 	l.Set("i18nDir", "i18n")
 	return deps.DepsCfg{
 		Language:            l,
+		Site:                htesting.NewTestHugoSite(),
 		Cfg:                 cfg,
 		Fs:                  fs,
 		Logger:              logger,
@@ -200,6 +197,14 @@ func TestI18nTranslate(t *testing.T) {
 	var actual, expected string
 	v := viper.New()
 	v.SetDefault("defaultContentLanguage", "en")
+	v.Set("contentDir", "content")
+	v.Set("dataDir", "data")
+	v.Set("i18nDir", "i18n")
+	v.Set("layoutDir", "layouts")
+	v.Set("archetypeDir", "archetypes")
+	v.Set("assetDir", "assets")
+	v.Set("resourceDir", "resources")
+	v.Set("publishDir", "public")
 
 	// Test without and with placeholders
 	for _, enablePlaceholders := range []bool{false, true} {

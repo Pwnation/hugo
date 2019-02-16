@@ -39,6 +39,20 @@ func init() {
 			[][2]string{},
 		)
 
+		ns.AddMethodMapping(ctx.Complement,
+			[]string{"complement"},
+			[][2]string{
+				{`{{ slice "a" "b" "c" "d" "e" "f" | complement (slice "b" "c") (slice "d" "e")  }}`, `[a f]`},
+			},
+		)
+
+		ns.AddMethodMapping(ctx.SymDiff,
+			[]string{"symdiff"},
+			[][2]string{
+				{`{{ slice 1 2 3 | symdiff (slice 3 4) }}`, `[1 2 4]`},
+			},
+		)
+
 		ns.AddMethodMapping(ctx.Delimit,
 			[]string{"delimit"},
 			[][2]string{
@@ -138,12 +152,30 @@ func init() {
 			[][2]string{},
 		)
 
+		ns.AddMethodMapping(ctx.Append,
+			[]string{"append"},
+			[][2]string{},
+		)
+
+		ns.AddMethodMapping(ctx.Group,
+			[]string{"group"},
+			[][2]string{},
+		)
+
 		ns.AddMethodMapping(ctx.Seq,
 			[]string{"seq"},
 			[][2]string{
 				{`{{ seq 3 }}`, `[1 2 3]`},
 			},
 		)
+
+		ns.AddMethodMapping(ctx.NewScratch,
+			[]string{"newScratch"},
+			[][2]string{
+				{`{{ $scratch := newScratch }}{{ $scratch.Add "b" 2 }}{{ $scratch.Add "b" 2 }}{{ $scratch.Get "b" }}`, `4`},
+			},
+		)
+
 		ns.AddMethodMapping(ctx.Uniq,
 			[]string{"uniq"},
 			[][2]string{

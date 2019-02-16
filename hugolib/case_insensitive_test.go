@@ -19,8 +19,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gohugoio/hugo/deps"
 	"github.com/gohugoio/hugo/hugofs"
+
+	"github.com/gohugoio/hugo/deps"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/require"
 )
@@ -124,6 +125,7 @@ Shortcode Site: {{ .Page.Site.Params.COLOR }}|{{ .Site.Params.COLORS.YELLOW  }}
 	writeToFs(t, fs, "layouts/partials/partial.html", `
 Partial Page: {{ .Params.COLOR }}|{{ .Params.Colors.Blue }}
 Partial Site: {{ .Site.Params.COLOR }}|{{ .Site.Params.COLORS.YELLOW }}
+Partial Site Global: {{ site.Params.COLOR }}|{{ site.Params.COLORS.YELLOW }}
 `)
 
 	writeToFs(t, fs, "config.toml", caseMixingSiteConfigTOML)
@@ -149,7 +151,7 @@ func TestCaseInsensitiveConfigurationVariations(t *testing.T) {
 
 	caseMixingTestsWriteCommonSources(t, mm)
 
-	cfg, err := LoadConfig(mm, "", "config.toml")
+	cfg, _, err := LoadConfig(ConfigSourceDescriptor{Fs: mm, Filename: "config.toml"})
 	require.NoError(t, err)
 
 	fs := hugofs.NewFrom(mm, cfg)
@@ -199,6 +201,7 @@ Site Colors: {{ .Site.Params.COLOR }}|{{ .Site.Params.COLORS.YELLOW }}
 		"Shortcode Site: green|yellow",
 		"Partial Page: red|heavenly",
 		"Partial Site: green|yellow",
+		"Partial Site Global: green|yellow",
 		"Page Title: Side 1",
 		"Site Title: Nynorsk title",
 		"&laquo;Hi&raquo;", // angled quotes
@@ -260,7 +263,7 @@ func doTestCaseInsensitiveConfigurationForTemplateEngine(t *testing.T, suffix st
 
 	caseMixingTestsWriteCommonSources(t, mm)
 
-	cfg, err := LoadConfig(mm, "", "config.toml")
+	cfg, err := LoadConfigDefault(mm)
 	require.NoError(t, err)
 
 	fs := hugofs.NewFrom(mm, cfg)

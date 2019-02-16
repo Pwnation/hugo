@@ -1,15 +1,23 @@
 package deps
 
 import (
-	"io/ioutil"
-	"log"
-	"os"
+	"sync"
+	"time"
 
+	"github.com/pkg/errors"
+
+	"github.com/gohugoio/hugo/cache/filecache"
+	"github.com/gohugoio/hugo/common/hugo"
+	"github.com/gohugoio/hugo/common/loggers"
 	"github.com/gohugoio/hugo/config"
 	"github.com/gohugoio/hugo/helpers"
 	"github.com/gohugoio/hugo/hugofs"
+	"github.com/gohugoio/hugo/langs"
+	"github.com/gohugoio/hugo/media"
 	"github.com/gohugoio/hugo/metrics"
 	"github.com/gohugoio/hugo/output"
+	"github.com/gohugoio/hugo/resources"
+	"github.com/gohugoio/hugo/source"
 	"github.com/gohugoio/hugo/tpl"
 	jww "github.com/spf13/jwalterweatherman"
 )
@@ -18,11 +26,18 @@ import (
 // There will be normally only one instance of deps in play
 // at a given time, i.e. one per Site built.
 type Deps struct {
+
 	// The logger to use.
-	Log *jww.Notepad `json:"-"`
+	Log *loggers.Logger `json:"-"`
+
+	// Used to log errors that may repeat itself many times.
+	DistinctErrorLog *helpers.DistinctLogger
 
 	// The templates to use. This will usually implement the full tpl.TemplateHandler.
 	Tmpl tpl.TemplateFinder `json:"-"`
+
+	// We use this to parse and execute ad-hoc text templates.
+	TextTmpl tpl.TemplateParseFinder `json:"-"`
 
 	// The file systems to use.
 	Fs *hugofs.Fs `json:"-"`
@@ -33,13 +48,26 @@ type Deps struct {
 	// The ContentSpec to use
 	*helpers.ContentSpec `json:"-"`
 
+	// The SourceSpec to use
+	SourceSpec *source.SourceSpec `json:"-"`
+
+	// The Resource Spec to use
+	ResourceSpec *resources.Spec
+
 	// The configuration to use
 	Cfg config.Provider `json:"-"`
+
+	// The file cache to use.
+	FileCaches filecache.Caches
 
 	// The translation func to use
 	Translate func(translationID string, args ...interface{}) string `json:"-"`
 
-	Language *helpers.Language
+	// The language in use. TODO(bep) consolidate with site
+	Language *langs.Language
+
+	// The site building.
+	Site hugo.Site
 
 	// All the output formats available for the current site.
 	OutputFormatsConfig output.Formats
@@ -50,6 +78,66 @@ type Deps struct {
 	translationProvider ResourceProvider
 
 	Metrics metrics.Provider
+
+	// Timeout is configurable in site config.
+	Timeout time.Duration
+
+	// BuildStartListeners will be notified before a build starts.
+	BuildStartListeners *Listeners
+
+	*globalErrHandler
+}
+
+type globalErrHandler struct {
+	// Channel for some "hard to get to" build errors
+	buildErrors chan error
+}
+
+// SendErr sends the error on a channel to be handled later.
+// This can be used in situations where returning and aborting the current
+// operation isn't practical.
+func (e *globalErrHandler) SendError(err error) {
+	if e.buildErrors != nil {
+		select {
+		case e.buildErrors <- err:
+		default:
+		}
+		return
+	}
+
+	jww.ERROR.Println(err)
+}
+
+func (e *globalErrHandler) StartErrorCollector() chan error {
+	e.buildErrors = make(chan error, 10)
+	return e.buildErrors
+}
+
+// Listeners represents an event listener.
+type Listeners struct {
+	sync.Mutex
+
+	// A list of funcs to be notified about an event.
+	listeners []func()
+}
+
+// Add adds a function to a Listeners instance.
+func (b *Listeners) Add(f func()) {
+	if b == nil {
+		return
+	}
+	b.Lock()
+	defer b.Unlock()
+	b.listeners = append(b.listeners, f)
+}
+
+// Notify executes all listener functions.
+func (b *Listeners) Notify() {
+	b.Lock()
+	defer b.Unlock()
+	for _, notify := range b.listeners {
+		notify()
+	}
 }
 
 // ResourceProvider is used to create and refresh, and clone resources needed.
@@ -72,10 +160,6 @@ func (d *Deps) LoadResources() error {
 
 	if err := d.templateProvider.Update(d); err != nil {
 		return err
-	}
-
-	if th, ok := d.Tmpl.(tpl.TemplateHandler); ok {
-		th.PrintErrors()
 	}
 
 	return nil
@@ -103,7 +187,7 @@ func New(cfg DepsCfg) (*Deps, error) {
 	}
 
 	if logger == nil {
-		logger = jww.NewNotepad(jww.LevelError, jww.LevelError, os.Stdout, ioutil.Discard, "", log.Ldate|log.Ltime)
+		logger = loggers.NewErrorLogger()
 	}
 
 	if fs == nil {
@@ -111,8 +195,26 @@ func New(cfg DepsCfg) (*Deps, error) {
 		fs = hugofs.NewDefault(cfg.Language)
 	}
 
+	if cfg.MediaTypes == nil {
+		cfg.MediaTypes = media.DefaultTypes
+	}
+
+	if cfg.OutputFormats == nil {
+		cfg.OutputFormats = output.DefaultFormats
+	}
+
 	ps, err := helpers.NewPathSpec(fs, cfg.Language)
 
+	if err != nil {
+		return nil, err
+	}
+
+	fileCaches, err := filecache.NewCaches(ps)
+	if err != nil {
+		return nil, errors.WithMessage(err, "failed to create file caches from configuration")
+	}
+
+	resourceSpec, err := resources.NewSpec(ps, fileCaches, logger, cfg.OutputFormats, cfg.MediaTypes)
 	if err != nil {
 		return nil, err
 	}
@@ -122,16 +224,33 @@ func New(cfg DepsCfg) (*Deps, error) {
 		return nil, err
 	}
 
+	sp := source.NewSourceSpec(ps, fs.Source)
+
+	timeoutms := cfg.Language.GetInt("timeout")
+	if timeoutms <= 0 {
+		timeoutms = 3000
+	}
+
+	distinctErrorLogger := helpers.NewDistinctLogger(logger.ERROR)
+
 	d := &Deps{
 		Fs:                  fs,
 		Log:                 logger,
+		DistinctErrorLog:    distinctErrorLogger,
 		templateProvider:    cfg.TemplateProvider,
 		translationProvider: cfg.TranslationProvider,
 		WithTemplate:        cfg.WithTemplate,
 		PathSpec:            ps,
 		ContentSpec:         contentSpec,
+		SourceSpec:          sp,
+		ResourceSpec:        resourceSpec,
 		Cfg:                 cfg.Language,
 		Language:            cfg.Language,
+		Site:                cfg.Site,
+		FileCaches:          fileCaches,
+		BuildStartListeners: &Listeners{},
+		Timeout:             time.Duration(timeoutms) * time.Millisecond,
+		globalErrHandler:    &globalErrHandler{},
 	}
 
 	if cfg.Cfg.GetBool("templateMetrics") {
@@ -143,10 +262,11 @@ func New(cfg DepsCfg) (*Deps, error) {
 
 // ForLanguage creates a copy of the Deps with the language dependent
 // parts switched out.
-func (d Deps) ForLanguage(l *helpers.Language) (*Deps, error) {
+func (d Deps) ForLanguage(cfg DepsCfg, onCreated func(d *Deps) error) (*Deps, error) {
+	l := cfg.Language
 	var err error
 
-	d.PathSpec, err = helpers.NewPathSpec(d.Fs, l)
+	d.PathSpec, err = helpers.NewPathSpecWithBaseBaseFsProvided(d.Fs, l, d.BaseFs)
 	if err != nil {
 		return nil, err
 	}
@@ -156,8 +276,25 @@ func (d Deps) ForLanguage(l *helpers.Language) (*Deps, error) {
 		return nil, err
 	}
 
+	d.Site = cfg.Site
+
+	// The resource cache is global so reuse.
+	// TODO(bep) clean up these inits.
+	resourceCache := d.ResourceSpec.ResourceCache
+	d.ResourceSpec, err = resources.NewSpec(d.PathSpec, d.ResourceSpec.FileCaches, d.Log, cfg.OutputFormats, cfg.MediaTypes)
+	if err != nil {
+		return nil, err
+	}
+	d.ResourceSpec.ResourceCache = resourceCache
+
 	d.Cfg = l
 	d.Language = l
+
+	if onCreated != nil {
+		if err = onCreated(&d); err != nil {
+			return nil, err
+		}
+	}
 
 	if err := d.translationProvider.Clone(&d); err != nil {
 		return nil, err
@@ -166,6 +303,8 @@ func (d Deps) ForLanguage(l *helpers.Language) (*Deps, error) {
 	if err := d.templateProvider.Clone(&d); err != nil {
 		return nil, err
 	}
+
+	d.BuildStartListeners = &Listeners{}
 
 	return &d, nil
 
@@ -177,16 +316,25 @@ func (d Deps) ForLanguage(l *helpers.Language) (*Deps, error) {
 type DepsCfg struct {
 
 	// The Logger to use.
-	Logger *jww.Notepad
+	Logger *loggers.Logger
 
 	// The file systems to use
 	Fs *hugofs.Fs
 
 	// The language to use.
-	Language *helpers.Language
+	Language *langs.Language
+
+	// The Site in use
+	Site hugo.Site
 
 	// The configuration to use.
 	Cfg config.Provider
+
+	// The media types configured.
+	MediaTypes media.Types
+
+	// The output formats configured.
+	OutputFormats output.Formats
 
 	// Template handling.
 	TemplateProvider ResourceProvider
@@ -194,4 +342,7 @@ type DepsCfg struct {
 
 	// i18n handling.
 	TranslationProvider ResourceProvider
+
+	// Whether we are in running (server) mode
+	Running bool
 }

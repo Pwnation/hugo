@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gohugoio/hugo/common/hugo"
 	"github.com/spf13/cast"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -171,6 +172,17 @@ func doTestCompare(t *testing.T, tp tstCompareType, funcUnderTest func(a, b inte
 		{tstEqerType1("a"), tstEqerType2("a"), 0},
 		{tstEqerType2("a"), tstEqerType1("a"), 0},
 		{tstEqerType2("a"), tstEqerType1("b"), -1},
+		{hugo.MustParseVersion("0.32.1").Version(), hugo.MustParseVersion("0.32").Version(), 1},
+		{hugo.MustParseVersion("0.35").Version(), hugo.MustParseVersion("0.32").Version(), 1},
+		{hugo.MustParseVersion("0.36").Version(), hugo.MustParseVersion("0.36").Version(), 0},
+		{hugo.MustParseVersion("0.32").Version(), hugo.MustParseVersion("0.36").Version(), -1},
+		{hugo.MustParseVersion("0.32").Version(), "0.36", -1},
+		{"0.36", hugo.MustParseVersion("0.32").Version(), 1},
+		{"0.36", hugo.MustParseVersion("0.36").Version(), 0},
+		{"0.37", hugo.MustParseVersion("0.37-DEV").Version(), 1},
+		{"0.37-DEV", hugo.MustParseVersion("0.37").Version(), -1},
+		{"0.36", hugo.MustParseVersion("0.37-DEV").Version(), -1},
+		{"0.37-DEV", hugo.MustParseVersion("0.37-DEV").Version(), 0},
 	} {
 		result := funcUnderTest(test.left, test.right)
 		success := false

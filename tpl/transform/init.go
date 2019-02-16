@@ -88,6 +88,21 @@ func init() {
 			},
 		)
 
+		ns.AddMethodMapping(ctx.Remarshal,
+			nil,
+			[][2]string{
+				{`{{ "title = \"Hello World\"" | transform.Remarshal "json" | safeHTML }}`, "{\n   \"title\": \"Hello World\"\n}\n"},
+			},
+		)
+
+		ns.AddMethodMapping(ctx.Unmarshal,
+			[]string{"unmarshal"},
+			[][2]string{
+				{`{{ "hello = \"Hello World\"" | transform.Unmarshal }}`, "map[hello:Hello World]"},
+				{`{{ "hello = \"Hello World\"" | resources.FromString "data/greetings.toml" | transform.Unmarshal }}`, "map[hello:Hello World]"},
+			},
+		)
+
 		return ns
 
 	}

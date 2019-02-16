@@ -15,7 +15,7 @@ package hugolib
 
 import (
 	"bytes"
-	"time"
+	"fmt"
 
 	"errors"
 
@@ -26,11 +26,28 @@ import (
 // Build builds all sites. If filesystem events are provided,
 // this is considered to be a potential partial rebuild.
 func (h *HugoSites) Build(config BuildCfg, events ...fsnotify.Event) error {
+	errCollector := h.StartErrorCollector()
+	errs := make(chan error)
+
+	go func(from, to chan error) {
+		var errors []error
+		i := 0
+		for e := range from {
+			i++
+			if i > 50 {
+				break
+			}
+			errors = append(errors, e)
+		}
+		to <- h.pickOneAndLogTheRest(errors)
+
+		close(to)
+
+	}(errCollector, errs)
+
 	if h.Metrics != nil {
 		h.Metrics.Reset()
 	}
-
-	t0 := time.Now()
 
 	// Need a pointer as this may be modified.
 	conf := &config
@@ -40,31 +57,46 @@ func (h *HugoSites) Build(config BuildCfg, events ...fsnotify.Event) error {
 		conf.whatChanged = &whatChanged{source: true, other: true}
 	}
 
-	if len(events) > 0 {
-		// Rebuild
-		if err := h.initRebuild(conf); err != nil {
-			return err
+	var prepareErr error
+
+	if !config.PartialReRender {
+		prepare := func() error {
+			for _, s := range h.Sites {
+				s.Deps.BuildStartListeners.Notify()
+			}
+
+			if len(events) > 0 {
+				// Rebuild
+				if err := h.initRebuild(conf); err != nil {
+					return err
+				}
+			} else {
+				if err := h.init(conf); err != nil {
+					return err
+				}
+			}
+
+			if err := h.process(conf, events...); err != nil {
+				return err
+			}
+
+			if err := h.assemble(conf); err != nil {
+				return err
+			}
+			return nil
 		}
-	} else {
-		if err := h.init(conf); err != nil {
-			return err
+
+		prepareErr = prepare()
+		if prepareErr != nil {
+			h.SendError(prepareErr)
 		}
+
 	}
 
-	if err := h.process(conf, events...); err != nil {
-		return err
-	}
-
-	if err := h.assemble(conf); err != nil {
-		return err
-	}
-
-	if err := h.render(conf); err != nil {
-		return err
-	}
-
-	if config.PrintStats {
-		h.Log.FEEDBACK.Printf("total in %v ms\n", int(1000*time.Since(t0).Seconds()))
+	if prepareErr == nil {
+		if err := h.render(conf); err != nil {
+			h.SendError(err)
+		}
 	}
 
 	if h.Metrics != nil {
@@ -74,6 +106,23 @@ func (h *HugoSites) Build(config BuildCfg, events ...fsnotify.Event) error {
 		h.Log.FEEDBACK.Printf("\nTemplate Metrics:\n\n")
 		h.Log.FEEDBACK.Print(b.String())
 		h.Log.FEEDBACK.Println()
+	}
+
+	select {
+	// Make sure the channel always gets something.
+	case errCollector <- nil:
+	default:
+	}
+	close(errCollector)
+
+	err := <-errs
+	if err != nil {
+		return err
+	}
+
+	errorCount := h.Log.ErrorCounter.Count()
+	if errorCount > 0 {
+		return fmt.Errorf("logged %d error(s)", errorCount)
 	}
 
 	return nil
@@ -95,31 +144,27 @@ func (h *HugoSites) init(config *BuildCfg) error {
 		h.reset()
 	}
 
-	if config.CreateSitesFromConfig {
-		if err := h.createSitesFromConfig(); err != nil {
+	if config.NewConfig != nil {
+		if err := h.createSitesFromConfig(config.NewConfig); err != nil {
 			return err
 		}
 	}
-
-	h.runMode.Watching = config.Watching
 
 	return nil
 }
 
 func (h *HugoSites) initRebuild(config *BuildCfg) error {
-	if config.CreateSitesFromConfig {
-		return errors.New("Rebuild does not support 'CreateSitesFromConfig'.")
+	if config.NewConfig != nil {
+		return errors.New("Rebuild does not support 'NewConfig'.")
 	}
 
 	if config.ResetState {
 		return errors.New("Rebuild does not support 'ResetState'.")
 	}
 
-	if !config.Watching {
+	if !h.running {
 		return errors.New("Rebuild called when not in watch mode")
 	}
-
-	h.runMode.Watching = config.Watching
 
 	if config.whatChanged.source {
 		// This is for the non-renderable content pages (rarely used, I guess).
@@ -132,6 +177,7 @@ func (h *HugoSites) initRebuild(config *BuildCfg) error {
 		s.resetBuildState()
 	}
 
+	h.resetLogs()
 	helpers.InitLoggers()
 
 	return nil
@@ -147,7 +193,7 @@ func (h *HugoSites) process(config *BuildCfg, events ...fsnotify.Event) error {
 
 	if len(events) > 0 {
 		// This is a rebuild
-		changed, err := firstSite.reProcess(events)
+		changed, err := firstSite.processPartial(events)
 		config.whatChanged = &changed
 		return err
 	}
@@ -169,13 +215,13 @@ func (h *HugoSites) assemble(config *BuildCfg) error {
 	if len(h.Sites) > 1 {
 		// The first is initialized during process; initialize the rest
 		for _, site := range h.Sites[1:] {
-			site.initializeSiteInfo()
+			if err := site.initializeSiteInfo(); err != nil {
+				return err
+			}
 		}
 	}
 
 	if config.whatChanged.source {
-		h.assembleGitInfo()
-
 		for _, s := range h.Sites {
 			if err := s.buildSiteMeta(); err != nil {
 				return err
@@ -188,24 +234,25 @@ func (h *HugoSites) assemble(config *BuildCfg) error {
 	}
 
 	for _, s := range h.Sites {
-		s.siteStats = &siteStats{}
-		for _, p := range s.Pages {
-			// May have been set in front matter
-			if len(p.outputFormats) == 0 {
-				p.outputFormats = s.outputFormats[p.Kind]
-			}
+		for _, pages := range []Pages{s.Pages, s.headlessPages} {
+			for _, p := range pages {
+				// May have been set in front matter
+				if len(p.outputFormats) == 0 {
+					p.outputFormats = s.outputFormats[p.Kind]
+				}
 
-			cnt := len(p.outputFormats)
-			if p.Kind == KindPage {
-				s.siteStats.pageCountRegular += cnt
-			}
-			s.siteStats.pageCount += cnt
+				if p.headless {
+					// headless = 1 output format only
+					p.outputFormats = p.outputFormats[:1]
+				}
+				for _, r := range p.Resources.ByType(pageResourceType) {
+					r.(*Page).outputFormats = p.outputFormats
+				}
 
-			if err := p.initTargetPathDescriptor(); err != nil {
-				return err
-			}
-			if err := p.initURLs(); err != nil {
-				return err
+				if err := p.initPaths(); err != nil {
+					return err
+				}
+
 			}
 		}
 		s.assembleMenus()
@@ -222,22 +269,41 @@ func (h *HugoSites) assemble(config *BuildCfg) error {
 }
 
 func (h *HugoSites) render(config *BuildCfg) error {
+	if !config.PartialReRender {
+		for _, s := range h.Sites {
+			s.initRenderFormats()
+		}
+	}
 
 	for _, s := range h.Sites {
-		s.initRenderFormats()
 		for i, rf := range s.renderFormats {
-			s.rc = &siteRenderingContext{Format: rf}
-			s.preparePagesForRender(config)
+			for _, s2 := range h.Sites {
+				// We render site by site, but since the content is lazily rendered
+				// and a site can "borrow" content from other sites, every site
+				// needs this set.
+				s2.rc = &siteRenderingContext{Format: rf}
+
+				isRenderingSite := s == s2
+
+				if !config.PartialReRender {
+					if err := s2.preparePagesForRender(isRenderingSite && i == 0); err != nil {
+						return err
+					}
+				}
+
+			}
 
 			if !config.SkipRender {
-				if err := s.render(config, i); err != nil {
-					return err
+				if config.PartialReRender {
+					if err := s.renderPages(config); err != nil {
+						return err
+					}
+				} else {
+					if err := s.render(config, i); err != nil {
+						return err
+					}
 				}
 			}
-		}
-
-		if !config.SkipRender && config.PrintStats {
-			s.Stats()
 		}
 	}
 

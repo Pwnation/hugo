@@ -11,12 +11,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package transform provides template functions for transforming content.
 package transform
 
 import (
 	"bytes"
 	"html"
 	"html/template"
+
+	"github.com/gohugoio/hugo/cache/namedmemcache"
 
 	"github.com/gohugoio/hugo/deps"
 	"github.com/gohugoio/hugo/helpers"
@@ -25,14 +28,22 @@ import (
 
 // New returns a new instance of the transform-namespaced template functions.
 func New(deps *deps.Deps) *Namespace {
+	cache := namedmemcache.New()
+	deps.BuildStartListeners.Add(
+		func() {
+			cache.Clear()
+		})
+
 	return &Namespace{
-		deps: deps,
+		cache: cache,
+		deps:  deps,
 	}
 }
 
 // Namespace provides template functions for the "transform" namespace.
 type Namespace struct {
-	deps *deps.Deps
+	cache *namedmemcache.Cache
+	deps  *deps.Deps
 }
 
 // Emojify returns a copy of s with all emoji codes replaced with actual emojis.
@@ -55,7 +66,7 @@ func (ns *Namespace) Highlight(s interface{}, lang, opts string) (template.HTML,
 		return "", err
 	}
 
-	highlighted, _ := ns.deps.ContentSpec.Highlight(html.UnescapeString(ss), lang, opts)
+	highlighted, _ := ns.deps.ContentSpec.Highlight(ss, lang, opts)
 	return template.HTML(highlighted), nil
 }
 
@@ -98,7 +109,7 @@ func (ns *Namespace) Markdownify(s interface{}) (template.HTML, error) {
 			Cfg:     ns.deps.Cfg,
 			Content: []byte(ss),
 			PageFmt: "markdown",
-			Config:  ns.deps.ContentSpec.NewBlackfriday(),
+			Config:  ns.deps.ContentSpec.BlackFriday,
 		},
 	)
 

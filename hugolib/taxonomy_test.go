@@ -68,17 +68,14 @@ func doTestTaxonomiesWithAndWithoutContentFile(t *testing.T, preserveTaxonomyNam
 baseURL = "http://example.com/blog"
 preserveTaxonomyNames = %t
 uglyURLs = %t
-
 paginate = 1
 defaultContentLanguage = "en"
-
 [Taxonomies]
 tag = "tags"
 category = "categories"
 other = "others"
 empty = "empties"
 permalinked = "permalinkeds"
-
 [permalinks]
 permalinkeds = "/perma/:slug/"
 `
@@ -115,8 +112,8 @@ permalinkeds:
 	writeSource(t, fs, "content/p3.md", fmt.Sprintf(pageTemplate, "t2/c12", "- tag2", "- cat2", "- o1", "- pl1"))
 	writeSource(t, fs, "content/p4.md", fmt.Sprintf(pageTemplate, "Hello World", "", "", "- \"Hello Hugo world\"", "- pl1"))
 
-	writeNewContentFile(t, fs, "Category Terms", "2017-01-01", "content/categories/_index.md", 10)
-	writeNewContentFile(t, fs, "Tag1 List", "2017-01-01", "content/tags/tag1/_index.md", 10)
+	writeNewContentFile(t, fs.Source, "Category Terms", "2017-01-01", "content/categories/_index.md", 10)
+	writeNewContentFile(t, fs.Source, "Tag1 List", "2017-01-01", "content/tags/Tag1/_index.md", 10)
 
 	err := h.Build(BuildCfg{})
 
@@ -136,20 +133,37 @@ permalinkeds:
 	}
 
 	// 1.
-	th.assertFileContent(pathFunc("public/categories/cat1/index.html"), "List", "Cat1")
+	if preserveTaxonomyNames {
+		th.assertFileContent(pathFunc("public/categories/cat1/index.html"), "List", "cat1")
+	} else {
+		th.assertFileContent(pathFunc("public/categories/cat1/index.html"), "List", "Cat1")
+	}
+
 	th.assertFileContent(pathFunc("public/categories/index.html"), "Terms List", "Category Terms")
 
 	// 2.
-	th.assertFileContent(pathFunc("public/tags/tag2/index.html"), "List", "Tag2")
+	if preserveTaxonomyNames {
+		th.assertFileContent(pathFunc("public/tags/tag2/index.html"), "List", "tag2")
+	} else {
+		th.assertFileContent(pathFunc("public/tags/tag2/index.html"), "List", "Tag2")
+	}
 	th.assertFileContent(pathFunc("public/tags/tag1/index.html"), "List", "Tag1")
 	th.assertFileContent(pathFunc("public/tags/index.html"), "Terms List", "Tags")
 
 	// 3.
-	th.assertFileContent(pathFunc("public/others/o1/index.html"), "List", "O1")
+	if preserveTaxonomyNames {
+		th.assertFileContent(pathFunc("public/others/o1/index.html"), "List", "o1")
+	} else {
+		th.assertFileContent(pathFunc("public/others/o1/index.html"), "List", "O1")
+	}
 	th.assertFileContent(pathFunc("public/others/index.html"), "Terms List", "Others")
 
 	// 4.
-	th.assertFileContent(pathFunc("public/perma/pl1/index.html"), "List", "Pl1")
+	if preserveTaxonomyNames {
+		th.assertFileContent(pathFunc("public/perma/pl1/index.html"), "List", "pl1")
+	} else {
+		th.assertFileContent(pathFunc("public/perma/pl1/index.html"), "List", "Pl1")
+	}
 	// This looks kind of funky, but the taxonomy terms do not have a permalinks definition,
 	// for good reasons.
 	th.assertFileContent(pathFunc("public/permalinkeds/index.html"), "Terms List", "Permalinkeds")
@@ -200,14 +214,89 @@ permalinkeds:
 	if preserveTaxonomyNames {
 		helloWorld := s.getPage(KindTaxonomy, "others", "Hello Hugo world")
 		require.NotNil(t, helloWorld)
-		require.Equal(t, "Hello Hugo world", helloWorld.Title)
+		require.Equal(t, "Hello Hugo world", helloWorld.title)
 	} else {
 		helloWorld := s.getPage(KindTaxonomy, "others", "hello-hugo-world")
 		require.NotNil(t, helloWorld)
-		require.Equal(t, "Hello Hugo World", helloWorld.Title)
+		require.Equal(t, "Hello Hugo World", helloWorld.title)
 	}
 
 	// Issue #2977
 	th.assertFileContent(pathFunc("public/empties/index.html"), "Terms List", "Empties")
+
+}
+
+// https://github.com/gohugoio/hugo/issues/5513
+// https://github.com/gohugoio/hugo/issues/5571
+func TestTaxonomiesPathSeparation(t *testing.T) {
+	t.Parallel()
+
+	assert := require.New(t)
+
+	config := `
+baseURL = "https://example.com"
+[taxonomies]
+"news/tag" = "news/tags"
+"news/category" = "news/categories"
+"t1/t2/t3" = "t1/t2/t3s"
+"s1/s2/s3" = "s1/s2/s3s"
+`
+
+	pageContent := `
++++
+title = "foo"
+"news/categories" = ["a", "b", "c", "d/e", "f/g/h"]
+"t1/t2/t3s" = ["t4/t5", "t4/t5/t6"]
++++
+Content.
+`
+
+	b := newTestSitesBuilder(t)
+	b.WithConfigFile("toml", config)
+	b.WithContent("page.md", pageContent)
+	b.WithContent("news/categories/b/_index.md", `
+---
+title: "This is B"
+---
+`)
+
+	b.WithContent("news/categories/f/g/h/_index.md", `
+---
+title: "This is H"
+---
+`)
+
+	b.WithContent("t1/t2/t3s/t4/t5/_index.md", `
+---
+title: "This is T5"
+---
+`)
+
+	b.WithContent("s1/s2/s3s/_index.md", `
+---
+title: "This is S3s"
+---
+`)
+
+	b.CreateSites().Build(BuildCfg{})
+
+	s := b.H.Sites[0]
+
+	ta := s.findPagesByKind(KindTaxonomy)
+	te := s.findPagesByKind(KindTaxonomyTerm)
+
+	assert.Equal(4, len(te))
+	assert.Equal(7, len(ta))
+
+	b.AssertFileContent("public/news/categories/a/index.html", "Taxonomy List Page 1|A|Hello|https://example.com/news/categories/a/|")
+	b.AssertFileContent("public/news/categories/b/index.html", "Taxonomy List Page 1|This is B|Hello|https://example.com/news/categories/b/|")
+	b.AssertFileContent("public/news/categories/d/e/index.html", "Taxonomy List Page 1|D/E|Hello|https://example.com/news/categories/d/e/|")
+	b.AssertFileContent("public/news/categories/f/g/h/index.html", "Taxonomy List Page 1|This is H|Hello|https://example.com/news/categories/f/g/h/|")
+	b.AssertFileContent("public/t1/t2/t3s/t4/t5/index.html", "Taxonomy List Page 1|This is T5|Hello|https://example.com/t1/t2/t3s/t4/t5/|")
+	b.AssertFileContent("public/t1/t2/t3s/t4/t5/t6/index.html", "Taxonomy List Page 1|T4/T5/T6|Hello|https://example.com/t1/t2/t3s/t4/t5/t6/|")
+
+	b.AssertFileContent("public/news/categories/index.html", "Taxonomy Term Page 1|News/Categories|Hello|https://example.com/news/categories/|")
+	b.AssertFileContent("public/t1/t2/t3s/index.html", "Taxonomy Term Page 1|T1/T2/T3s|Hello|https://example.com/t1/t2/t3s/|")
+	b.AssertFileContent("public/s1/s2/s3s/index.html", "Taxonomy Term Page 1|This is S3s|Hello|https://example.com/s1/s2/s3s/|")
 
 }

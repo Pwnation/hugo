@@ -73,7 +73,7 @@ func (p Pages) RelatedIndices(doc related.Document, indices ...interface{}) (Pag
 		return nil, err
 	}
 
-	result, err := p.searchDoc(page, indicesStr...)
+	result, err := p.searchDoc(doc, indicesStr...)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +154,7 @@ func newSearchIndexHandler(cfg related.Config) *relatedDocsHandler {
 // This assumes that a lock has been acquired.
 func (s *relatedDocsHandler) getIndex(p Pages) *related.InvertedIndex {
 	for _, ci := range s.postingLists {
-		if fastEqualPages(p, ci.p) {
+		if pagesEqual(p, ci.p) {
 			return ci.postingList
 		}
 	}

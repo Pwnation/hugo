@@ -13,6 +13,10 @@
 
 package config
 
+import (
+	"github.com/spf13/cast"
+)
+
 // Provider provides the configuration settings for Hugo.
 type Provider interface {
 	GetString(key string) string
@@ -20,7 +24,19 @@ type Provider interface {
 	GetBool(key string) bool
 	GetStringMap(key string) map[string]interface{}
 	GetStringMapString(key string) map[string]string
+	GetStringSlice(key string) []string
 	Get(key string) interface{}
 	Set(key string, value interface{})
 	IsSet(key string) bool
+}
+
+// GetStringSlicePreserveString returns a string slice from the given config and key.
+// It differs from the GetStringSlice method in that if the config value is a string,
+// we do not attempt to split it into fields.
+func GetStringSlicePreserveString(cfg Provider, key string) []string {
+	sd := cfg.Get(key)
+	if sds, ok := sd.(string); ok {
+		return []string{sds}
+	}
+	return cast.ToStringSlice(sd)
 }
